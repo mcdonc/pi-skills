@@ -1,0 +1,14 @@
+# OS / editor cruft
+.DS_Store
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# logs
+*.log
+
+# pi never writes skill state into this dir (slop cursor lives in
+# ~/.local/state/pi-slop/), but ignore any stray local state just in case
+.slop-state/
