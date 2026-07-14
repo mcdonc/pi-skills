@@ -74,9 +74,26 @@ When the user runs `/skill:workon <ISSUE#> [repo]` (or asks equivalently):
 
 4. **Implement the issue**: read the printed issue body, break it into concrete
    steps, make code changes, run tests/linters, and commit incrementally on the
-   new branch. Open a PR when done (`gh pr create` from the worktree).
+   new branch.
 
-5. When finished (PR merged), clean up with the `/skill:merge <PR#>` skill,
+5. **Rebase onto the latest default branch before pushing.** Main may have
+   moved since the worktree was created (other PRs merged — often via squash,
+   which rewrites the base SHA with no ancestry link to the branch). A stale
+   base shows up as spurious "conflicts" on PR creation even when there's no
+   real divergence. Before the first push, and again whenever the PR sits
+   open while other PRs land:
+   ```bash
+   git fetch origin <default-branch>
+   git rebase origin/<default-branch>
+   # resolve any conflicts, then:
+   git push -u origin HEAD --force-with-lease
+   ```
+   Re-run the full test suite after the rebase to confirm the merge is clean.
+
+6. **Open a PR** (`gh pr create` from the worktree) once the rebase is clean
+   and the suite passes.
+
+7. When finished (PR merged), clean up with the `/skill:merge <PR#>` skill,
    which removes the worktree and deletes the branch.
 
 ## Notes
@@ -84,9 +101,15 @@ When the user runs `/skill:workon <ISSUE#> [repo]` (or asks equivalently):
 - Worktrees live at `<repo_root>/.worktrees/<branch>` and are excluded from git
   status via `.git/info/exclude` (no changes to `.gitignore`).
 - The base is `origin/<default-branch>` by default (fetched fresh), so each
-  worktree starts from the latest default tip — not from any local dirty state.
-  Pass `--base <BRANCH>` to base the worktree off a different branch (e.g. a
-  release/stable branch) instead.
+  worktree starts from the latest default tip at **workon time** — not from
+  any local dirty state. Pass `--base <BRANCH>` to base the worktree off a
+  different branch (e.g. a release/stable branch) instead. But "latest at
+  workon time" ≠ "latest at push time": main can move while you work.
+  **Rebase before pushing** (Workflow step 5). This is especially important
+  on repos that squash-merge: a squash landing after workon replaces the
+  linear history with a fresh commit SHA, so the branch's parent no longer
+  matches main even when the content is identical — producing phantom
+  conflicts on PR creation.
 - If the issue is not OPEN, the script aborts. Reopen it first if you really want
   to work on a closed issue.
 - Re-running the skill on the same issue reuses the existing worktree rather
