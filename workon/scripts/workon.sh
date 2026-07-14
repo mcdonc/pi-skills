@@ -6,10 +6,16 @@
 #   ISSUE#      required issue number
 #   REPO        optional repo (owner/name); defaults to the current dir's repo
 #
+# Branch/worktree naming:
+#   Names are issue-<N>-<short-slug> where the *total* length is capped
+#   (prefix + slug together). The cap defaults to 30; override per-repo or
+#   per-invocation with PI_WORKON_MAX_NAME_LEN (e.g. a repo whose AGENTS.md
+#   caps worktree dir names at 20 chars sets PI_WORKON_MAX_NAME_LEN=20).
+#
 # What it does:
 #   1. Fetches the issue (title, state, url, body) via `gh issue view`.
 #   2. Aborts unless the issue is OPEN.
-#   3. Derives a branch name: issue-<N>-<slug-of-title>.
+#   3. Derives a short branch name: issue-<N>-<slug> (total length capped).
 #   4. If a worktree for that branch already exists, reuses it (prints the path).
 #   5. Otherwise creates a worktree off origin/<default-branch> at
 #      <repo_root>/.worktrees/<branch>, ensuring the path is in
@@ -71,18 +77,30 @@ if [ "$STATE" != "OPEN" ]; then
   exit 1
 fi
 
-# --- Slugify the title ---
-SLUG="$(printf '%s' "$TITLE" | python3 -c '
+# --- Branch name: issue-<N>-<short-slug>, total length capped -----------
+# The cap bounds the WHOLE name (prefix + slug), not just the slug. Default
+# 30; PI_WORKON_MAX_NAME_LEN overrides (per-repo, e.g. a ≤20-char convention).
+MAX_NAME_LEN="${PI_WORKON_MAX_NAME_LEN:-30}"
+PREFIX="issue-${ISSUE}"
+BRANCH="$(printf '%s\t%s\t%s' "$TITLE" "$PREFIX" "$MAX_NAME_LEN" | python3 -c '
 import re, sys, unicodedata
-s = sys.stdin.read()
-s = unicodedata.normalize("NFKD", s).encode("ascii","ignore").decode()
+title, prefix, cap_s = sys.stdin.read().split("\t")
+cap = int(cap_s)
+s = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode()
 s = s.lower()
 s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
 s = re.sub(r"-+", "-", s)
-s = s[:60].rstrip("-")
-print(s or "issue")
+name = prefix if not s else f"{prefix}-{s}"
+# Bound the TOTAL name. Truncate, then drop any trailing dash left over.
+name = name[:cap].rstrip("-")
+# A tiny cap could chop past the slug back into the prefix; keep at least
+# the prefix (issue-<N>) which is the unique, required part.
+if len(prefix) <= cap:
+    name = name if name.startswith(prefix) else prefix[:cap].rstrip("-")
+else:
+    name = prefix[:cap].rstrip("-")
+print(name)
 ')"
-BRANCH="issue-${ISSUE}-${SLUG}"
 
 # --- Default branch (base for the worktree) ---
 DEFAULT_BRANCH="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null \
