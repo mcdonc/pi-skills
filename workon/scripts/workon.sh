@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # workon.sh — start work on a GitHub issue in a fresh git worktree.
 #
-# Usage: workon.sh [--dry-run] <ISSUE#> [REPO]
+# Usage: workon.sh [--dry-run] [--base <BRANCH>] <ISSUE#> [REPO]
 #   --dry-run   Print what would happen; create nothing.
+#   --base BR   Base the worktree off origin/<BR> instead of the repo's default
+#               branch (e.g. --base stable/1.0 for release-tracked work).
 #   ISSUE#      required issue number
 #   REPO        optional repo (owner/name); defaults to the current dir's repo
 #
@@ -17,8 +19,9 @@
 #   2. Aborts unless the issue is OPEN.
 #   3. Derives a short branch name: issue-<N>-<slug> (total length capped).
 #   4. If a worktree for that branch already exists, reuses it (prints the path).
-#   5. Otherwise creates a worktree off origin/<default-branch> at
-#      <repo_root>/.worktrees/<branch>, ensuring the path is in
+#   5. Otherwise creates a worktree off origin/<base> (the repo's default
+#      branch, or the one named by --base) at <repo_root>/.worktrees/<branch>,
+#      ensuring the path is in
 #      .git/info/exclude so it never shows up as untracked in the main checkout.
 #   6. Prints a summary: branch, worktree path, issue title/url, and the issue
 #      body so the agent can begin implementing immediately.
@@ -28,12 +31,40 @@
 set -uo pipefail
 
 DRY_RUN=0
-if [ "${1:-}" = "--dry-run" ]; then
-  DRY_RUN=1
-  shift
-fi
+BASE_OVERRIDE=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    --base)
+      [ $# -ge 2 ] || {
+        echo "workon.sh: --base requires a branch name argument." >&2
+        exit 2
+      }
+      BASE_OVERRIDE="$2"
+      shift 2
+      ;;
+    --base=*)
+      BASE_OVERRIDE="${1#--base=}"
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      echo "workon.sh: unknown option: $1" >&2
+      exit 2
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
 
-ISSUE="${1:?usage: workon.sh [--dry-run] <ISSUE#> [REPO]}"
+ISSUE="${1:?usage: workon.sh [--dry-run] [--base <BRANCH>] <ISSUE#> [REPO]}"
 REPO="${2:-}"
 
 # gh invocation (with optional --repo)
@@ -102,16 +133,22 @@ else:
 print(name)
 ')"
 
-# --- Default branch (base for the worktree) ---
-DEFAULT_BRANCH="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null \
-  | sed 's@^origin/@@' 2>/dev/null)"
-[ -z "$DEFAULT_BRANCH" ] && DEFAULT_BRANCH="$("${GH[@]}" repo view --json defaultBranchRef -q .defaultBranchRef.name 2>/dev/null)"
-[ -z "$DEFAULT_BRANCH" ] && DEFAULT_BRANCH="main"
+# --- Base branch for the worktree (origin/<base>) ---
+# --base overrides; otherwise derive the repo's default branch
+# (origin/HEAD, falling back to the repo's configured default, then 'main').
+if [ -n "$BASE_OVERRIDE" ]; then
+  BASE_BRANCH="$BASE_OVERRIDE"
+else
+  BASE_BRANCH="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null \
+    | sed 's@^origin/@@' 2>/dev/null)"
+  [ -z "$BASE_BRANCH" ] && BASE_BRANCH="$("${GH[@]}" repo view --json defaultBranchRef -q .defaultBranchRef.name 2>/dev/null)"
+  [ -z "$BASE_BRANCH" ] && BASE_BRANCH="main"
+fi
 
 WORKTREE_DIR="${REPO_ROOT}/.worktrees/${BRANCH}"
 
 echo "  branch=$BRANCH"
-echo "  base=origin/$DEFAULT_BRANCH"
+echo "  base=origin/$BASE_BRANCH"
 echo "  worktree=$WORKTREE_DIR"
 
 # --- Reuse existing worktree for this branch, if any ---
@@ -158,8 +195,8 @@ fi
 
 if [ "$DRY_RUN" = 1 ]; then
   echo
-  echo "[dry-run] would run: git fetch origin $DEFAULT_BRANCH"
-  echo "[dry-run] would run: git worktree add -b $BRANCH $WORKTREE_DIR origin/$DEFAULT_BRANCH"
+  echo "[dry-run] would run: git fetch origin $BASE_BRANCH"
+  echo "[dry-run] would run: git worktree add -b $BRANCH $WORKTREE_DIR origin/$BASE_BRANCH"
   echo
   echo "=== Issue body (preview) ==="
   printf '%s\n' "$BODY"
@@ -174,15 +211,15 @@ if ! grep -qxF ".worktrees/" "$EXCLUDE_FILE" 2>/dev/null; then
 fi
 
 # --- Fetch base branch ---
-echo "Fetching origin/$DEFAULT_BRANCH..."
-git fetch --quiet origin "$DEFAULT_BRANCH" 2>&1 || {
-  echo "workon.sh: git fetch origin/$DEFAULT_BRANCH failed." >&2
+echo "Fetching origin/$BASE_BRANCH..."
+git fetch --quiet origin "$BASE_BRANCH" 2>&1 || {
+  echo "workon.sh: git fetch origin/$BASE_BRANCH failed." >&2
   exit 1
 }
 
 # --- Create the worktree ---
 # If the local branch already exists (e.g. from a previous aborted attempt),
-# reuse it; otherwise create a new one tracking origin/<default>.
+# reuse it; otherwise create a new one off origin/<base>.
 if git show-ref --verify --quiet "refs/heads/$BRANCH" 2>/dev/null; then
   echo "Local branch '$BRANCH' already exists; checking it out in a new worktree..."
   git worktree add --force "$WORKTREE_DIR" "$BRANCH" 2>&1 || {
@@ -190,8 +227,8 @@ if git show-ref --verify --quiet "refs/heads/$BRANCH" 2>/dev/null; then
     exit 1
   }
 else
-  echo "Creating worktree at $WORKTREE_DIR off origin/$DEFAULT_BRANCH..."
-  git worktree add -b "$BRANCH" "$WORKTREE_DIR" "origin/$DEFAULT_BRANCH" 2>&1 || {
+  echo "Creating worktree at $WORKTREE_DIR off origin/$BASE_BRANCH..."
+  git worktree add -b "$BRANCH" "$WORKTREE_DIR" "origin/$BASE_BRANCH" 2>&1 || {
     echo "workon.sh: git worktree add failed." >&2
     exit 1
   }

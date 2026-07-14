@@ -10,11 +10,14 @@ repo's default branch, in one shot.
 
 ## Command
 
-- `workon.sh [--dry-run] <ISSUE#> [REPO]` — fetch issue, create worktree, print
-  issue body.
+- `workon.sh [--dry-run] [--base <BRANCH>] <ISSUE#> [REPO]` — fetch issue,
+  create worktree, print issue body.
 
 Arguments:
 - `--dry-run` — optional; print what would happen without creating anything.
+- `--base <BRANCH>` — optional; base the worktree off `origin/<BRANCH>` instead
+  of the repo's default branch (e.g. `--base stable/1.0` for release-tracked
+  work). The value is a branch name **without** the `origin/` prefix.
 - `<ISSUE#>` — required issue number.
 - `[REPO]` — optional repo as `owner/name`. Defaults to the current directory's
   repo (detected via gh).
@@ -30,9 +33,10 @@ Arguments:
    worktree dir names at 20 chars exports `PI_WORKON_MAX_NAME_LEN=20`).
 4. If a worktree already exists for that branch, **reuses it** (prints the path)
    instead of creating a duplicate.
-5. Otherwise creates a worktree off `origin/<default-branch>` at
-   `<repo_root>/.worktrees/<branch>`, ensuring `.worktrees/` is in
-   `.git/info/exclude` (local-only; does not modify the shared `.gitignore`).
+5. Otherwise creates a worktree off `origin/<base>` — the repo's default
+   branch, or the one named by `--base` — at `<repo_root>/.worktrees/<branch>`,
+   ensuring `.worktrees/` is in `.git/info/exclude` (local-only; does not modify
+   the shared `.gitignore`).
 6. Prints a summary with `WORKTREE_PATH=`, `BRANCH=`, `ISSUE_URL=`, and the full
    issue body.
 
@@ -79,8 +83,10 @@ When the user runs `/skill:workon <ISSUE#> [repo]` (or asks equivalently):
 
 - Worktrees live at `<repo_root>/.worktrees/<branch>` and are excluded from git
   status via `.git/info/exclude` (no changes to `.gitignore`).
-- The base is always `origin/<default-branch>` (fetched fresh), so each worktree
-  starts from the latest default tip — not from any local dirty state.
+- The base is `origin/<default-branch>` by default (fetched fresh), so each
+  worktree starts from the latest default tip — not from any local dirty state.
+  Pass `--base <BRANCH>` to base the worktree off a different branch (e.g. a
+  release/stable branch) instead.
 - If the issue is not OPEN, the script aborts. Reopen it first if you really want
   to work on a closed issue.
 - Re-running the skill on the same issue reuses the existing worktree rather
