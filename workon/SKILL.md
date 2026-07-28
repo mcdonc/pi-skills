@@ -28,9 +28,10 @@ Arguments:
 2. Aborts unless the issue is **OPEN** (refuses to start work on closed issues).
 3. Derives a branch name: `issue-<N>-<short-slug>` (ASCII, kebab-case,
    where the **total** name length — prefix + slug together — is capped, not
-   just the slug). The cap defaults to 30; set `PI_WORKON_MAX_NAME_LEN` to
-   override it per-repo or per-invocation (e.g. a repo whose convention caps
-   worktree dir names at 20 chars exports `PI_WORKON_MAX_NAME_LEN=20`).
+   just the slug). The cap defaults to 16 (the global AGENTS.md worktree
+   rule); set `PI_WORKON_MAX_NAME_LEN` to override it per-repo or
+   per-invocation (e.g. a repo whose convention caps worktree dir names at
+   20 chars exports `PI_WORKON_MAX_NAME_LEN=20`).
 4. If a worktree already exists for that branch, **reuses it** (prints the path)
    instead of creating a duplicate.
 5. Otherwise creates a worktree off `origin/<base>` — the repo's default

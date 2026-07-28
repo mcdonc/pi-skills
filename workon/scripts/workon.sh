@@ -10,9 +10,10 @@
 #
 # Branch/worktree naming:
 #   Names are issue-<N>-<short-slug> where the *total* length is capped
-#   (prefix + slug together). The cap defaults to 30; override per-repo or
-#   per-invocation with PI_WORKON_MAX_NAME_LEN (e.g. a repo whose AGENTS.md
-#   caps worktree dir names at 20 chars sets PI_WORKON_MAX_NAME_LEN=20).
+#   (prefix + slug together). The cap defaults to 16 (per the global
+#   AGENTS.md worktree rule); override per-repo or per-invocation with
+#   PI_WORKON_MAX_NAME_LEN (e.g. a repo whose AGENTS.md caps worktree dir
+#   names at 20 chars sets PI_WORKON_MAX_NAME_LEN=20).
 #
 # What it does:
 #   1. Fetches the issue (title, state, url, body) via `gh issue view`.
@@ -110,8 +111,9 @@ fi
 
 # --- Branch name: issue-<N>-<short-slug>, total length capped -----------
 # The cap bounds the WHOLE name (prefix + slug), not just the slug. Default
-# 30; PI_WORKON_MAX_NAME_LEN overrides (per-repo, e.g. a ≤20-char convention).
-MAX_NAME_LEN="${PI_WORKON_MAX_NAME_LEN:-30}"
+# 16 (global AGENTS.md worktree rule); PI_WORKON_MAX_NAME_LEN overrides
+# (per-repo, e.g. a ≤20-char convention).
+MAX_NAME_LEN="${PI_WORKON_MAX_NAME_LEN:-16}"
 PREFIX="issue-${ISSUE}"
 BRANCH="$(printf '%s\t%s\t%s' "$TITLE" "$PREFIX" "$MAX_NAME_LEN" | python3 -c '
 import re, sys, unicodedata
