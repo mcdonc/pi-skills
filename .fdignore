@@ -1,0 +1,6 @@
+# pi treats direct root .md files in ~/.pi/agent/skills/ as skills and
+# requires YAML frontmatter (name + description). README.md is repo
+# documentation, not a skill, so exclude it from skill discovery here.
+# Using .fdignore (not .gitignore) so git still tracks README.md normally
+# and ripgrep still searches it; only pi and fd skip it.
+README.md
