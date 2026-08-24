@@ -34,8 +34,9 @@ Arguments:
 2. Fetches the PR via `gh pr view`; **aborts unless it's OPEN** (can't stack on
    a merged/closed PR — use `/skill:workon <issue>` to base on main instead).
 3. Fetches the issue via `gh issue view`; aborts unless OPEN. Prints the body.
-4. Derives a branch name `issue-<ISSUE#>-<slug>` (ASCII kebab-case, total
-   length capped — default 16, override with `PI_STACKON_MAX_NAME_LEN`).
+4. Derives a branch name `i<N>-<slug>` (ASCII kebab-case, total length
+   capped — default 16), the same rule as workon; override with
+   `PI_WORKON_MAX_NAME_LEN` (legacy `PI_STACKON_MAX_NAME_LEN` still honored).
 5. If a worktree for that branch already exists, **reuses it** (prints the path).
 6. Otherwise fetches the PR's head via `git fetch origin refs/pull/<PR>/head`
    (works for same-repo **and** fork PRs — GitHub serves every PR head at that

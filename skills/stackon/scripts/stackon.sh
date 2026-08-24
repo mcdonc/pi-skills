@@ -13,14 +13,15 @@
 # review. Works for same-repo AND fork PRs: GitHub serves every PR's head at
 # refs/pull/<N>/head regardless of which fork owns the branch.
 #
-# Branch/worktree naming: issue-<ISSUE#>-<slug>, total length capped at
-# PI_STACKON_MAX_NAME_LEN (default 16, mirroring the workon rule).
+# Branch/worktree naming: i<N>-<short-slug> with the *total* length capped
+# (default 16), exactly as workon.sh names its branches — override with
+# PI_WORKON_MAX_NAME_LEN (or legacy PI_STACKON_MAX_NAME_LEN).
 #
 # What it does:
 #   1. Normalizes the PR + issue args (bare number or github URL → number).
 #   2. Fetches the PR; aborts unless OPEN. Records its head branch.
 #   3. Fetches the issue; aborts unless OPEN.
-#   4. Derives branch issue-<ISSUE#>-<slug> (length-capped).
+#   4. Derives branch i<N>-<slug> (same rule as workon; length-capped).
 #   5. If a worktree for that branch exists, reuses it (prints the path).
 #   6. Otherwise fetches refs/pull/<PR>/head and creates a worktree off that
 #      commit at <repo_root>/.worktrees/<branch>, adding .worktrees/ to
@@ -140,9 +141,9 @@ if [ "$I_STATE" != "OPEN" ]; then
   exit 1
 fi
 
-# --- Branch name: issue-<ISSUE#>-<slug>, total length capped -------------
-MAX_NAME_LEN="${PI_STACKON_MAX_NAME_LEN:-16}"
-PREFIX="issue-${ISSUE}"
+# --- Branch name: i<N>-<slug>, total length capped (same rule as workon) ---
+MAX_NAME_LEN="${PI_STACKON_MAX_NAME_LEN:-${PI_WORKON_MAX_NAME_LEN:-16}}"
+PREFIX="i${ISSUE}"
 BRANCH="$(printf '%s\t%s\t%s' "$I_TITLE" "$PREFIX" "$MAX_NAME_LEN" | python3 -c '
 import re, sys, unicodedata
 title, prefix, cap_s = sys.stdin.read().split("\t")
