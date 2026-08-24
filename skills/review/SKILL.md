@@ -35,6 +35,12 @@ you can't see because you wrote them.
    mandate is the whole value of the skill — a generic "review this PR" prompt
    gets a generic review.
 
+   **Speed matters too.** For PRs under a few hundred lines, paste the diff
+   itself into the mandate — it saves the reviewer many orientation round-trips
+   (git log, --stat, re-reading files you already read). The template also tells
+   the reviewer not to re-run full suites (CI is authoritative); keep that
+   instruction unless the PR's whole point is test behavior.
+
 3. **Spawn the reviewer with the script.** Hand it your mandate file:
    ```bash
    scripts/review.sh --pr <NUM|branch|url> --prompt <mandate.md>
