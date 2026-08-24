@@ -11,23 +11,32 @@ Layout:
 
 ## Live location / how pi loads these
 
-The skills half of this repo is checked out directly into pi's global skill directory. The intended checkout location is exactly:
+The repo is cloned to `~/projects/pi-skills` and exposed to pi through two
+directory symlinks — `~/.pi/agent/skills` → `skills/` and
+`~/.pi/agent/extensions` → `extensions/`. Skills are discovered by scanning
+that directory recursively for folders containing a `SKILL.md`, and
+extensions are TypeScript modules auto-discovered and hot-reloadable — so
+edits in the repo are live immediately, no build step.
+
+Extensions live in `extensions/` and are loaded via a directory symlink:
 
 ```
-~/.pi/agent/skills/
+ln -s ~/projects/pi-skills/extensions ~/.pi/agent/extensions
 ```
-
-pi discovers skills by scanning that directory recursively for folders containing a `SKILL.md`, so `skills/<name>/SKILL.md` under the checkout is picked up live as it's edited — no symlink, no settings change, no build step.
-
-Extensions are picked up separately: symlink `extensions/<name>` into `~/.pi/agent/extensions/` (see `extensions/keybase/README.md` for an example), and pi auto-discovers and hot-reloads them with `/reload`.
 
 ### Restore on a new machine
 
 ```bash
-gh repo clone mcdonc/pi-skills ~/.pi/agent/skills
-mkdir -p ~/.pi/agent/extensions
-ln -s ~/.pi/agent/skills/extensions/keybase ~/.pi/agent/extensions/keybase
+gh repo clone mcdonc/pi-skills ~/projects/pi-skills
+ln -s ~/projects/pi-skills/skills ~/.pi/agent/skills
+ln -s ~/projects/pi-skills/extensions ~/.pi/agent/extensions
+cd ~/projects/pi-skills/extensions/zai-web-search && npm ci
 ```
+
+That's it — pi picks up skills and extensions live from the repo; edits are
+immediate, `/reload` hot-reloads extensions. (Requires `gh` and `jq` on
+`PATH` for the skill scripts; the `screenshot` skill additionally needs a
+vision-capable model configured.)
 
 ## Skill catalog
 
