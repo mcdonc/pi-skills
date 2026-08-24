@@ -5,8 +5,8 @@
 set -uo pipefail
 
 COMMON_DIR="${SLOP_COMMON_DIR:-}"
-[ -d "$COMMON_DIR" ] || COMMON_DIR="$(dirname "$(readlink -f "$0")")/../slop-common"
-[ -d "$COMMON_DIR" ] || COMMON_DIR="$HOME/.pi/agent/skills/slop-common"
+[ -d "$COMMON_DIR" ] || COMMON_DIR="$(dirname "$(readlink -f "$0")")/../../slop-common"
+[ -d "$COMMON_DIR" ] || COMMON_DIR="$HOME/.pi/agent/skills/skills/slop-common"
 if [ ! -d "$COMMON_DIR" ]; then echo "keep-closed: slop-common not found" >&2; exit 1; fi
 # shellcheck source=/dev/null
 source "$COMMON_DIR/repo.sh"

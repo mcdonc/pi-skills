@@ -25,8 +25,8 @@ Each skill's script resolves this directory with a three-tier fallback:
 
 ```bash
 COMMON_DIR="${SLOP_COMMON_DIR:-}"
-[ -d "$COMMON_DIR" ] || COMMON_DIR="$(dirname "$(readlink -f "$0")")/../slop-common"
-[ -d "$COMMON_DIR" ] || COMMON_DIR="$HOME/.pi/agent/skills/slop-common"
+[ -d "$COMMON_DIR" ] || COMMON_DIR="$(dirname "$(readlink -f "$0")")/../../slop-common"
+[ -d "$COMMON_DIR" ] || COMMON_DIR="$HOME/.pi/agent/skills/skills/slop-common"
 source "$COMMON_DIR/score.sh"
 ```
 

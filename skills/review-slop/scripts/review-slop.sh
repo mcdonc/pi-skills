@@ -5,8 +5,8 @@ set -euo pipefail
 
 # Resolve the shared library (three-tier fallback, see slop-common/README.md).
 COMMON_DIR="${SLOP_COMMON_DIR:-}"
-[ -d "$COMMON_DIR" ] || COMMON_DIR="$(dirname "$(readlink -f "$0")")/../slop-common"
-[ -d "$COMMON_DIR" ] || COMMON_DIR="$HOME/.pi/agent/skills/slop-common"
+[ -d "$COMMON_DIR" ] || COMMON_DIR="$(dirname "$(readlink -f "$0")")/../../slop-common"
+[ -d "$COMMON_DIR" ] || COMMON_DIR="$HOME/.pi/agent/skills/skills/slop-common"
 if [ ! -d "$COMMON_DIR" ]; then
   echo "review-slop: slop-common library not found (set SLOP_COMMON_DIR)" >&2
   exit 1

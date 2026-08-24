@@ -90,6 +90,6 @@ detail verbatim (a hallucinated path, a precise repro).
   the file-path verification; otherwise `grounding` is neutral (8/25) and
   `checked_grounding` is false. The checkout's local HEAD must be current — a
   stale checkout may mark real paths as "not found".
-- The score weights are isolated in `slop-common/score.sh`; they're tunable over
+- The score weights are isolated in `skills/slop-common/score.sh`; they're tunable over
   time from keep-closed-vs-promoted outcomes.
 - The script only reads (gh api / gh view); it changes nothing on GitHub.
