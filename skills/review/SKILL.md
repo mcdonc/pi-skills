@@ -35,6 +35,12 @@ you can't see because you wrote them.
    mandate is the whole value of the skill — a generic "review this PR" prompt
    gets a generic review.
 
+   **Speed matters too.** For PRs under a few hundred lines, paste the diff
+   itself into the mandate — it saves the reviewer many orientation round-trips
+   (git log, --stat, re-reading files you already read). The template also tells
+   the reviewer not to re-run full suites (CI is authoritative); keep that
+   instruction unless the PR's whole point is test behavior.
+
 3. **Spawn the reviewer with the script.** Hand it your mandate file:
    ```bash
    scripts/review.sh --pr <NUM|branch|url> --prompt <mandate.md>
@@ -48,6 +54,12 @@ you can't see because you wrote them.
 4. **Monitor and surface the result.** Poll the output file (the script prints
    the path + a polling command). When the reviewer finishes, read the review to
    the user and, if asked, triage the findings into fix-now / discuss / dismiss.
+
+**Overlap, don't serialize.** The reviewer runs in the background by default.
+Spawn it immediately after the first push — not after the PR body, changelog
+entry, and everything else are written — then do those chores while it runs.
+By the time the PR is presentable, the review is usually done. If you run
+/review serially at the end, the fix is scheduling, not speed.
 
 ## Critical pitfalls (the script handles these — here so you understand why)
 
@@ -66,15 +78,20 @@ you can't see because you wrote them.
 
 ## When NOT to use this
 
-- Trivial PRs (typo, one-line fix) — overhead isn't worth it.
+- **Small diffs (< ~50 changed lines) with no security/behavior surface** — a
+  typo, a one-line fix, a docs tweak. An in-session critical re-read (read the
+  diff yourself as if a stranger wrote it) replaces the subprocess; the
+  spawn + orientation overhead exceeds the review itself.
 - You need a *fast* gut-check — use a normal in-session read instead.
 - The PR isn't yours and you haven't lost objectivity on it.
 
 ## Notes
 
 - The reviewer runs **in the same repo/worktree** (inherits cwd) so it sees the
-  real code and can run the real tests the CI way.
-- Default model is pi's configured default. For adversarial review, prefer a
-  strong reasoning model (`--thinking high`) — `o3-pro`, `opus`, `gemini-pro`,
-  or `z.ai/glm-5.2` all work. Pass `--model <provider/id>`.
+  real code and can run the real tests.
+- Default model is pi's configured default, `--thinking high`. **Right-size
+  both.** `high` + a strong reasoning model (`o3-pro`, `opus`, `gemini-pro`,
+  `z.ai/glm-5.2`) is for auth/security surfaces, migrations, large refactors.
+  For a typical scoped workon PR, `--thinking medium` (or a faster model)
+  loses little and finishes much sooner. Pass `--model <provider/id>`.
 - Output is plain markdown; feed it back to the user verbatim or summarize it.

@@ -29,13 +29,19 @@ git diff main...HEAD --stat     # whole-feature scope
 ```
 
 Then read the changed files directly — especially the security-sensitive ones,
-the ones with the most churn, and the tests.
+the ones with the most churn, and the tests. If the mandate already includes
+the diff or file excerpts, use them and skip re-fetching.
 
 ## How to investigate
 
 - Read the actual code; don't trust docstrings or comments to match behavior.
-- Run the tests the CI way if the project documents one (check AGENTS.md / docs).
-  Note any coverage gaps, not just green/red.
+- **Don't re-run full test suites.** CI is authoritative and re-runs everything
+  on the same hardware moments later — a full local suite run wastes minutes and
+  adds no signal. Verify a specific claim only when a finding genuinely needs
+  proof, scoped to that claim: `testmon` (changed-line selection), a single
+  `-k <test>` run, or the project's venv python directly
+  (e.g. `.devenv/state/venv/bin/python -m pytest`) to skip dev-shell eval
+  overhead. Note coverage gaps by reading tests, not by running the suite.
 - Trace data and control flow across the diff boundaries — bugs hide where the
   new code meets the old.
 - Check error/edge cases: empty input, concurrent access, large input, partial
