@@ -26,8 +26,8 @@ Arguments:
 
 1. Fetches the issue (title, state, url, body) via `gh issue view`.
 2. Aborts unless the issue is **OPEN** (refuses to start work on closed issues).
-3. Derives a branch name: `issue-<N>-<short-slug>` (ASCII, kebab-case,
-   where the **total** name length — prefix + slug together — is capped, not
+3. Derives a branch name: `i<N>-<short-slug>` (ASCII, kebab-case,
+   where the **total** name length — issue num + slug together — is capped, not
    just the slug). The cap defaults to 16 (the global AGENTS.md worktree
    rule); set `PI_WORKON_MAX_NAME_LEN` to override it per-repo or
    per-invocation (e.g. a repo whose convention caps worktree dir names at
