@@ -8,6 +8,9 @@ Layout:
 
 - `skills/` — the agent skills (each a `SKILL.md` + `scripts/`)
 - `extensions/` — pi extensions (TypeScript, loaded from `~/.pi/agent/extensions/`)
+  — includes `worktree-indicator.ts`, a footer status bar that shows the
+  active linked worktree + branch, whether `/review` has run on it
+  (`review ✓/◌/✗`), and the branch's GitHub CI state (`CI ✓/✗/◌/–`).
 
 ## Live location / how pi loads these
 

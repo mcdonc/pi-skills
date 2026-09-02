@@ -45,7 +45,7 @@ you can't see because you wrote them.
    ```bash
    scripts/review.sh --pr <NUM|branch|url> --prompt <mandate.md>
    # optionally pick a strong reasoning model:
-   scripts/review.sh --pr 1390 --prompt /tmp/review.md --model z.ai/glm-5.2 --thinking high
+   scripts/review.sh --pr 1390 --prompt /tmp/review.md --model z.ai/glm-5.3 --thinking high
    ```
    The script handles the tricky parts — detaching the subprocess, giving it
    `--approve` so tools actually run, capturing the real child PID, and telling
@@ -91,7 +91,12 @@ By the time the PR is presentable, the review is usually done. If you run
   real code and can run the real tests.
 - Default model is pi's configured default, `--thinking high`. **Right-size
   both.** `high` + a strong reasoning model (`o3-pro`, `opus`, `gemini-pro`,
-  `z.ai/glm-5.2`) is for auth/security surfaces, migrations, large refactors.
+  `z.ai/glm-5.3`) is for auth/security surfaces, migrations, large refactors.
   For a typical scoped workon PR, `--thinking medium` (or a faster model)
   loses little and finishes much sooner. Pass `--model <provider/id>`.
 - Output is plain markdown; feed it back to the user verbatim or summarize it.
+- Every run is recorded under `~/.pi/agent/reviews/<repo>/<branch>/<ts>/`
+  (`meta`, the mandate, `review.md`, `pid`, `done`). Past reviews stay
+  discoverable there, and the `worktree-indicator` footer extension reads these
+  records to show `review ✓/◌/✗` for the branch you're working in. Override the
+  location with `PI_REVIEWS_DIR`.

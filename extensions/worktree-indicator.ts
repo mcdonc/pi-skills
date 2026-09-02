@@ -5,7 +5,19 @@
  * inside a git linked worktree — the state you're in when /workon or /merge
  * create a PR-producing worktree. Renders:
  *
- *   🌿 <repo>/<worktrees-dir>/<name>  ⎇ <branch>  #<issue>
+ *   🌿 <repo>/<worktrees-dir>/<name>  ⎇ <branch>  #<issue>  review ✓ 12m  CI ✓
+ *
+ * Two extra segments ride along when the worktree is on a real branch:
+ *
+ *   review ✓ <age>  — a /review (skills/review) run completed for this branch
+ *                      (recorded under ~/.pi/agent/reviews/<repo>/<branch>/).
+ *                      Warning-colored + "(stale)" when HEAD moved since the
+ *                      review. review ◌ = running, review ✗ = died/failed,
+ *                      muted review – = never reviewed.
+ *   CI ✓ / ✗ <name> / ◌ / – — GitHub checks for the branch via gh: PR checks
+ *                      when a PR exists, else workflow runs for the pushed
+ *                      branch. Muted – = nothing has run. Omitted entirely
+ *                      when gh can't answer (not a GitHub repo, no network).
  *
  * Detection tracks the agent's *actual* tool activity, not just the session
  * cwd: when the session is rooted at the main repo (the common case — /workon
@@ -19,10 +31,10 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
-import { execSync } from "node:child_process";
+import { execFile, execSync } from "node:child_process";
+import { homedir } from "node:os";
 import { basename, relative, resolve } from "node:path";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 
 // Matches the root of a linked worktree inside a path or command string —
 // absolute (`/home/x/repo/.worktrees/name`) or relative (`repo/.worktrees/name`,
@@ -81,42 +93,247 @@ function issueFromBranch(branch: string): string | null {
 	return m ? m[1]! : null;
 }
 
-export default function worktreeIndicator(pi: ExtensionAPI): void {
-	// Absolute path of the worktree root we're currently showing (if any).
-	// Persists across turns until the worktree is removed or a different one
-	// is touched — the agent rarely switches worktrees mid-session, so this
-	// avoids flicker.
-	let current: string | null = null;
+// ---------------------------------------------------------------------------
+// Review + CI indicators
+// ---------------------------------------------------------------------------
 
-	function render(ctx: ExtensionContext): void {
-		if (!ctx.hasUI) return;
+/** Where review.sh records runs (same default as the script; overridable). */
+const REVIEWS_DIR = process.env.PI_REVIEWS_DIR || resolve(homedir(), ".pi/agent/reviews");
 
-		let info: { rel: string; repo: string; branch: string } | null = null;
-		if (current && existsSync(current) && isLinkedWorktree(current)) {
-			info = worktreeInfo(current);
-			if (!info) current = null; // was a worktree, no longer valid
-		} else {
-			current = null;
+/** CI results are cached per (worktree, branch, head) and refreshed at most this often. */
+const CI_TTL_MS = 60_000;
+
+/**
+ * Stable per-repo key matching repo_slug() in skills/review/scripts/review.sh:
+ * the origin remote's owner/repo, falling back to the main checkout's name.
+ */
+function repoSlug(wtRoot: string): string | null {
+	const raw = git(wtRoot, "config", "--get", "remote.origin.url");
+	if (raw) {
+		let u = raw.replace(/\.git\/?$/, "");
+		u = u.replace(/^[a-z+][a-z0-9+.-]*:\/\//, ""); // scheme:// (https://, ssh://, …)
+		u = u.replace(/^[^/:]*:/, ""); // scp-style host (git@host:)
+		const parts = u.split("/").filter(Boolean);
+		if (parts.length >= 2) return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
+	}
+	const common = git(wtRoot, "rev-parse", "--git-common-dir");
+	if (!common) return null;
+	return basename(common.replace(/\/\.git\/?$/, "")) || null;
+}
+
+/** Read a tiny `key=value`-per-line file (meta/done markers). Missing → {}. */
+function readKv(path: string): Record<string, string> {
+	try {
+		const out: Record<string, string> = {};
+		for (const line of readFileSync(path, "utf8").split("\n")) {
+			const i = line.indexOf("=");
+			if (i > 0) out[line.slice(0, i)!] = line.slice(i + 1).trimEnd();
 		}
+		return out;
+	} catch {
+		return {};
+	}
+}
 
-		if (!info || !current) {
-			ctx.ui.setStatus("worktree-indicator", undefined);
+function pidAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (e) {
+		return (e as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+/** Compact relative age: now / 12m / 3h / 2d. */
+function relTime(tsSec: number): string {
+	const s = Math.max(0, Math.floor(Date.now() / 1000 - tsSec));
+	if (s < 60) return "now";
+	const m = Math.floor(s / 60);
+	if (m < 60) return `${m}m`;
+	const h = Math.floor(m / 60);
+	if (h < 24) return `${h}h`;
+	return `${Math.floor(h / 24)}d`;
+}
+
+type ReviewState =
+	| { status: "running" }
+	| { status: "done"; finishedSec: number; stale: boolean }
+	| { status: "broken" };
+
+/**
+ * Latest /review run for this branch, from review.sh's records. null = never
+ * reviewed. "broken" = died without finishing (no done marker, dead pid).
+ */
+function reviewRecord(wtRoot: string, branch: string, head: string | null): ReviewState | null {
+	const slug = repoSlug(wtRoot);
+	if (!slug) return null;
+	let entries: string[];
+	try {
+		entries = readdirSync(resolve(REVIEWS_DIR, slug, branch.replace(/\//g, "-")));
+	} catch {
+		return null;
+	}
+	const newest = entries.filter((n) => /^\d+$/.test(n)).sort().at(-1);
+	if (!newest) return null;
+	const runDir = resolve(REVIEWS_DIR, slug, branch.replace(/\//g, "-"), newest);
+	const done = readKv(resolve(runDir, "done"));
+	if (done.finished) {
+		const meta = readKv(resolve(runDir, "meta"));
+		return {
+			status: !done.exit || done.exit === "0" ? "done" : "broken",
+			finishedSec: Number(done.finished) || 0,
+			stale: Boolean(head && meta.head && meta.head !== head),
+		};
+	}
+	const pid = Number(readKv(resolve(runDir, "pid")).pid);
+	return pid > 0 && pidAlive(pid) ? { status: "running" } : { status: "broken" };
+}
+
+type CiStatus = "green" | "red" | "pending" | "none" | "unknown";
+let ciCache: { key: string; status: CiStatus; detail?: string; at: number } | null = null;
+let ciBusy = false;
+
+/** Aggregate `gh pr checks --json bucket,name` rows. */
+function combineChecks(rows: Array<{ bucket?: string; name?: string }>): { status: CiStatus; detail?: string } {
+	const fail = rows.find((r) => r.bucket === "fail" || r.bucket === "cancel");
+	if (fail) return { status: "red", detail: fail.name };
+	if (rows.some((r) => r.bucket === "pending")) return { status: "pending" };
+	return { status: "green" }; // only pass/skipping left
+}
+
+/** Aggregate `gh run list --json status,conclusion,workflowName` rows (newest first). */
+const BAD_CONCLUSIONS = ["failure", "timed_out", "startup_failure", "cancelled"];
+function combineRuns(
+	rows: Array<{ status?: string; conclusion?: string | null; workflowName?: string }>,
+): { status: CiStatus; detail?: string } {
+	const bad = rows.find((r) => r.conclusion && BAD_CONCLUSIONS.includes(r.conclusion!));
+	if (bad) return { status: "red", detail: bad.workflowName };
+	if (rows.some((r) => !r.conclusion)) return { status: "pending" }; // in_progress / queued
+	if (rows.some((r) => r.conclusion === "success")) return { status: "green" };
+	return { status: "none" };
+}
+
+/** Parse JSON stdout safely; gh exits non-zero for pending/failed checks. */
+function safeJson(out: string): unknown {
+	try {
+		return JSON.parse(out);
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Fetch CI state for the branch off the UI thread; re-render when it lands.
+ * PR checks first (works pre-push once the PR exists); workflow runs for the
+ * branch as the no-PR fallback (pushed branches). "unknown" (gh unusable)
+ * omits the segment entirely.
+ */
+function kickCiFetch(wtRoot: string, branch: string, key: string, ctx: ExtensionContext): void {
+	if (ciBusy) return;
+	ciBusy = true;
+	const opts = { cwd: wtRoot, timeout: 15_000 };
+	const settle = (status: CiStatus, detail?: string) => {
+		ciCache = { key, status, detail, at: Date.now() };
+		ciBusy = false;
+		render(ctx);
+	};
+	execFile("gh", ["pr", "checks", branch, "--json", "bucket,name"], opts, (err, stdout) => {
+		const checks = safeJson(stdout ?? "");
+		if (Array.isArray(checks) && checks.length) {
+			const { status, detail } = combineChecks(checks);
+			settle(status, detail);
 			return;
 		}
+		execFile("gh", ["run", "list", "--branch", branch, "--limit", "5", "--json", "status,conclusion,workflowName"], opts, (_e2, out2) => {
+			const runs = safeJson(out2 ?? "");
+			if (!Array.isArray(runs)) {
+				settle("unknown");
+				return;
+			}
+			if (!runs.length) {
+				settle("none");
+				return;
+			}
+			const { status, detail } = combineRuns(runs);
+			settle(status, detail);
+		});
+	});
+}
 
-		const t = ctx.ui.theme;
-		const parts: string[] = [
-			t.fg("accent", "🌿"),
-			t.fg("accent", `${info.repo}/${info.rel}`),
-			t.fg("muted", "⎇"),
-			t.fg("success", info.branch),
-		];
-		const issue = issueFromBranch(info.branch);
-		if (issue) parts.push(t.fg("accent", `#${issue}`));
+/** CI segment string, or null to omit (gh can't answer / nothing cached yet is shown muted). */
+function ciSegment(wtRoot: string, branch: string, head: string, ctx: ExtensionContext): string | null {
+	const t = ctx.ui.theme;
+	const key = `${wtRoot}|${branch}|${head}`;
+	if (!ciCache || ciCache.key !== key || Date.now() - ciCache.at > CI_TTL_MS) kickCiFetch(wtRoot, branch, key, ctx);
+	if (!ciCache || ciCache.key !== key) return t.fg("muted", "CI …");
+	const c = ciCache;
+	if (c.status === "green") return t.fg("success", "CI ✓");
+	if (c.status === "red") return t.fg("error", `CI ✗${c.detail ? ` ${c.detail.slice(0, 16)}` : ""}`);
+	if (c.status === "pending") return t.fg("warning", "CI ◌");
+	if (c.status === "none") return t.fg("muted", "CI –");
+	return null; // unknown — gh unusable for this repo
+}
 
-		ctx.ui.setStatus("worktree-indicator", parts.join("  "));
+// Absolute path of the worktree root we're currently showing (if any).
+// Persists across turns until the worktree is removed or a different one is
+// touched — the agent rarely switches worktrees mid-session, so this avoids
+// flicker.
+let current: string | null = null;
+
+/**
+ * Render the footer status for the locked-on worktree. Module-level (not
+ * closed over in the extension factory) so the async CI fetch callback can
+ * re-render when a result lands.
+ */
+function render(ctx: ExtensionContext): void {
+	if (!ctx.hasUI) return;
+
+	let info: { rel: string; repo: string; branch: string } | null = null;
+	if (current && existsSync(current) && isLinkedWorktree(current)) {
+		info = worktreeInfo(current);
+		if (!info) current = null; // was a worktree, no longer valid
+	} else {
+		current = null;
 	}
 
+	if (!info || !current) {
+		ctx.ui.setStatus("worktree-indicator", undefined);
+		return;
+	}
+
+	const t = ctx.ui.theme;
+	const parts: string[] = [
+		t.fg("accent", "🌿"),
+		t.fg("accent", `${info.repo}/${info.rel}`),
+		t.fg("muted", "⎇"),
+		t.fg("success", info.branch),
+	];
+	const issue = issueFromBranch(info.branch);
+	if (issue) parts.push(t.fg("accent", `#${issue}`));
+
+	// Review + CI segments (skipped on detached HEAD — nothing to key them to).
+	if (info.branch !== "(detached)") {
+		const head = git(current, "rev-parse", "HEAD");
+		if (head) {
+			const rv = reviewRecord(current, info.branch, head);
+			parts.push(
+				rv?.status === "done"
+				? t.fg(rv.stale ? "warning" : "success", `review ✓ ${relTime(rv.finishedSec)}${rv.stale ? " (stale)" : ""}`)
+				: rv?.status === "running"
+					? t.fg("accent", "review ◌")
+					: rv?.status === "broken"
+						? t.fg("error", "review ✗")
+						: t.fg("muted", "review –"),
+			);
+			const ci = ciSegment(current, info.branch, head, ctx);
+			if (ci) parts.push(ci);
+		}
+	}
+
+	ctx.ui.setStatus("worktree-indicator", parts.join("  "));
+}
+
+export default function worktreeIndicator(pi: ExtensionAPI): void {
 	/** Scan a blob of text (a command or path) for a `.worktrees/<name>` root. */
 	function extractWorktreeRoot(text: string, cwd: string): string | null {
 		const m = text.match(WORKTREE_PATH_RE);
@@ -134,22 +351,28 @@ export default function worktreeIndicator(pi: ExtensionAPI): void {
 		render(ctx);
 	});
 
-	// Lock onto the worktree the agent is actually operating in. Watches the
-	// tools that carry filesystem paths / commands, so it tracks real activity
-	// even when the session cwd stays at the main repo.
-	pi.on("tool_call", async (event, ctx) => {
-		let blob = "";
-		if (isToolCallEventType("bash", event)) {
-			blob = event.input.command ?? "";
-		} else if (
-			isToolCallEventType("read", event) ||
-			isToolCallEventType("write", event) ||
-			isToolCallEventType("edit", event)
-		) {
-			blob = event.input.path ?? "";
+	/**
+	 * Pull the path/command blob out of a tool input for the tools that
+	 * carry filesystem paths. Returns "" for anything else. Shared by the
+	 * tool_call and tool_result handlers, whose input types differ.
+	 */
+	function blobFromInput(toolName: string, input: { command?: unknown; path?: unknown }): string {
+		if (toolName === "bash") return typeof input.command === "string" ? input.command : "";
+		if (toolName === "read" || toolName === "write" || toolName === "edit") {
+			return typeof input.path === "string" ? input.path : "";
 		}
 		// grep / ls / find also take path-ish args but with varied shapes; the
 		// four tools above cover the overwhelming majority of worktree access.
+		return "";
+	}
+
+	/** Scan a tool's input for a `.worktrees/<name>` root and lock onto it. */
+	function scanToolInput(
+		toolName: string,
+		input: { command?: unknown; path?: unknown },
+		ctx: ExtensionContext,
+	): void {
+		const blob = blobFromInput(toolName, input);
 		if (!blob) return;
 
 		const root = extractWorktreeRoot(blob, ctx.cwd);
@@ -158,6 +381,21 @@ export default function worktreeIndicator(pi: ExtensionAPI): void {
 			current = root;
 			render(ctx);
 		}
+	}
+
+	// Lock onto the worktree the agent is actually operating in. Watches the
+	// tools that carry filesystem paths / commands, so it tracks real activity
+	// even when the session cwd stays at the main repo.
+	pi.on("tool_call", async (event, ctx) => {
+		scanToolInput(event.toolName, event.input, ctx);
+	});
+
+	// tool_call fires *before* execution, so a worktree created by the very
+	// command being scanned (`git worktree add .worktrees/foo`) doesn't exist
+	// yet and is skipped by the isLinkedWorktree check. Re-scan the same input
+	// once the tool has finished to catch freshly created worktrees.
+	pi.on("tool_result", async (event, ctx) => {
+		scanToolInput(event.toolName, event.input, ctx);
 	});
 
 	pi.on("session_shutdown", async () => {

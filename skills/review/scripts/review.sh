@@ -15,7 +15,8 @@
 #                   - "local"                         -> reviews main...HEAD diff
 #   --prompt      Path to the review mandate (markdown). Required. The agent is
 #                 expected to have tailored references/review-prompt.md for the PR.
-#   --model       pi model as provider/id (e.g. z.ai/glm-5.2, openai/o3-pro).
+#   --model       pi model as provider/id (default z.ai/glm-5.3; e.g.
+#                 z.ai/glm-5.3, openai/o3-pro).
 #                 Defaults to pi's configured default.
 #   --thinking    off|minimal|low|medium|high|xhigh (default: high).
 #   --blind       Pass --no-context-files --no-skills so the reviewer has NO
@@ -33,14 +34,40 @@
 # The script does NOT write the mandate — the caller (the agent) produces a
 # tailored review prompt. This script just spawns the reviewer correctly.
 #
+# The script also records the run under ~/.pi/agent/reviews/<repo>/<branch>/<ts>/
+# (meta, mandate, review.md, pid, done) so the worktree-indicator footer
+# extension can show "has this branch been reviewed?". Override with
+# $PI_REVIEWS_DIR.
+#
 # CRITICAL: print mode (-p) cannot prompt for tool approval, so without --approve
 # pi can't run git/read/bash and silently emits nothing while appearing to run.
 # This script ALWAYS passes --approve. Don't "optimize" it away.
 set -uo pipefail
 
+# Stable per-repo directory key for the review record: the origin remote's
+# owner/repo, falling back to the checkout's directory name. Must stay in sync
+# with repoSlug() in extensions/worktree-indicator.ts.
+repo_slug() {
+  local dir="$1" url base owner
+  url="$(git -C "$dir" config --get remote.origin.url 2>/dev/null || true)"
+  if [ -n "$url" ]; then
+    url="${url%.git}"
+    url="${url#*://}"   # strip scheme:// (https://, ssh://, ...)
+    url="${url#*:}"     # strip scp-style host (git@host:)
+    base="${url##*/}"
+    owner="${url%"$base"}"; owner="${owner%/}"; owner="${owner##*/}"
+    if [ -n "$owner" ] && [ -n "$base" ]; then
+      printf '%s/%s' "$owner" "$base"
+      return 0
+    fi
+  fi
+  git -C "$dir" rev-parse --show-toplevel >/dev/null 2>&1 || return 1
+  basename "$(git -C "$dir" rev-parse --show-toplevel)"
+}
+
 PR=""
 PROMPT=""
-MODEL=""
+MODEL="z.ai/glm-5.3"
 THINKING="high"
 BLIND=0
 WORKTREE=""
@@ -77,6 +104,9 @@ command -v "$PI_BIN" >/dev/null 2>&1 || {
 
 [ -n "$WORKTREE" ] || WORKTREE="$PWD"
 [ -d "$WORKTREE" ] || { echo "review.sh: worktree dir not found: $WORKTREE" >&2; exit 1; }
+git -C "$WORKTREE" rev-parse --git-dir >/dev/null 2>&1 || {
+  echo "review.sh: not a git repository: $WORKTREE" >&2; exit 1;
+}
 
 # --- Resolve WHAT to review into a concrete description for the reviewer ---
 WHAT="$PR"
@@ -101,11 +131,36 @@ else
   SUBJECT="branch $PR (vs default branch)"
 fi
 
+# --- Review record (persistent, for the footer indicator) ---
+PI_REVIEWS_DIR="${PI_REVIEWS_DIR:-$HOME/.pi/agent/reviews}"
+BRANCH_AT_LAUNCH="$(git -C "$WORKTREE" branch --show-current 2>/dev/null || true)"
+[ -n "$BRANCH_AT_LAUNCH" ] || BRANCH_AT_LAUNCH="detached"
+BRANCH_SLUG="${BRANCH_AT_LAUNCH//\//-}"
+REPO_SLUG="$(repo_slug "$WORKTREE" || true)"
+[ -n "$REPO_SLUG" ] || REPO_SLUG="unknown"
+HEAD_SHA="$(git -C "$WORKTREE" rev-parse HEAD 2>/dev/null || true)"
+STARTED="$(date +%s)"
+RUN_DIR="$PI_REVIEWS_DIR/$REPO_SLUG/$BRANCH_SLUG/$STARTED"
+mkdir -p "$RUN_DIR"
+{
+  echo "repo=$REPO_SLUG"
+  echo "branch=$BRANCH_AT_LAUNCH"
+  echo "pr=$PR"
+  echo "subject=$SUBJECT"
+  echo "model=$MODEL"
+  echo "thinking=$THINKING"
+  echo "head=$HEAD_SHA"
+  echo "started=$STARTED"
+  echo "worktree=$WORKTREE"
+} > "$RUN_DIR/meta"
+
 # --- Output file ---
-[ -n "$OUT" ] || OUT="$(mktemp -t pr-review.XXXXXX.md)"
+# Default lives inside the run dir so past reviews are discoverable later.
+[ -n "$OUT" ] || OUT="$RUN_DIR/review.md"
 : > "$OUT"   # truncate so a stale prior run can't masquerade as this one
 ERR="${OUT%.md}.err.log"
 : > "$ERR"
+echo "out=$OUT" >> "$RUN_DIR/meta"
 
 # --- Build the pi invocation ---
 # NOTE on isolation flags:
@@ -140,7 +195,9 @@ launch() {
   if [ "$FOREGROUND" -eq 1 ]; then
     ( cd "$WORKTREE" && "$PI_BIN" "${ARGS[@]}" "$(cat "$OUT.prompt")" \
         >"$OUT" 2>"$ERR" )
-    return $?
+    rc=$?
+    printf 'finished=%s\nexit=%s\n' "$(date +%s)" "$rc" > "$RUN_DIR/done"
+    return "$rc"
   fi
   # Background: capture the REAL pi PID, not the wrapper bash PID. We write a
   # launcher script that contains the full argv baked in (avoids the
@@ -157,7 +214,12 @@ launch() {
     for a in "${ARGS[@]}"; do printf '  %q \\
 ' "$a"; done
     printf '  %q >%q 2>%q &\n' "$(cat "$OUT.prompt")" "$OUT" "$ERR"
-    printf 'echo $! > %q\n' "$PIDFILE"
+    printf 'review_pid=$!\n'
+    printf 'echo "$review_pid" > %q\n' "$PIDFILE"
+    printf 'echo "pid=$review_pid" > %q\n' "$RUN_DIR/pid"
+    # Wait (in this detached shell) and record completion for the indicator.
+    printf 'wait "$review_pid"; rc=$?\n'
+    printf 'printf "finished=%%s\\nexit=%%s\\n" "$(date +%%s)" "$rc" > %q\n' "$RUN_DIR/done"
   } > "$LAUNCHER"
   chmod +x "$LAUNCHER"
   setsid bash "$LAUNCHER" </dev/null >/dev/null 2>&1 &
@@ -174,6 +236,7 @@ launch() {
   echo "  cwd:      $WORKTREE"
   echo "  model:    ${MODEL:-pi default} (thinking=$THINKING, blind=$([ "$BLIND" -eq 1 ] && echo yes || echo no))"
   echo "  output:   $OUT"
+  echo "  record:   $RUN_DIR"
   echo "  stderr:   $ERR"
   if [ -n "$REAL_PID" ]; then
     echo "  pid:      $REAL_PID"
