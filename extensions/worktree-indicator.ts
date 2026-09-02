@@ -33,8 +33,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { execFile, execSync } from "node:child_process";
 import { homedir } from "node:os";
-import { basename, relative, resolve } from "node:path";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { basename, dirname, relative, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 
 // Matches the root of a linked worktree inside a path or command string —
 // absolute (`/home/x/repo/.worktrees/name`) or relative (`repo/.worktrees/name`,
@@ -281,6 +281,45 @@ function ciSegment(wtRoot: string, branch: string, head: string, ctx: ExtensionC
 let current: string | null = null;
 
 /**
+ * Persist the lock across /reload and new sessions: module state dies with a
+ * reload (fresh import), and session_start can only re-seed from the session
+ * cwd — which is usually the *main* repo, not the worktree. The state file
+ * remembers, per main repo, the last worktree we showed.
+ */
+const STATE_FILE = resolve(homedir(), ".pi/agent/worktree-indicator-state.json");
+
+function loadState(): Record<string, { worktree: string; at: number }> {
+	try {
+		return JSON.parse(readFileSync(STATE_FILE, "utf8"));
+	} catch {
+		return {};
+	}
+}
+
+function persistLock(mainRoot: string, wtRoot: string): void {
+	try {
+		const state = loadState();
+		state[mainRoot] = { worktree: wtRoot, at: Date.now() };
+		// Prune dead entries; keep only the most recent 50.
+		const alive = Object.entries(state)
+			.filter(([, v]) => existsSync(v.worktree))
+			.sort((a, b) => b[1].at - a[1].at)
+			.slice(0, 50);
+		mkdirSync(dirname(STATE_FILE), { recursive: true });
+		writeFileSync(STATE_FILE, JSON.stringify(Object.fromEntries(alive), null, "\t"));
+	} catch {
+		// State persistence is best-effort; never break rendering over it.
+	}
+}
+
+/** Main-repo root for a worktree (from the shared git dir), or null. */
+function mainRootOf(wtRoot: string): string | null {
+	const common = git(wtRoot, "rev-parse", "--git-common-dir");
+	if (!common) return null;
+	return resolve(wtRoot, common).replace(/\/\.git\/?$/, "") || null;
+}
+
+/**
  * Render the footer status for the locked-on worktree. Module-level (not
  * closed over in the extension factory) so the async CI fetch callback can
  * re-render when a result lands.
@@ -344,10 +383,38 @@ export default function worktreeIndicator(pi: ExtensionAPI): void {
 		return resolve(cwd, m[2]!);
 	}
 
+	/** Lock onto a worktree root: set module state, persist, re-render. */
+	function lockOn(root: string, ctx: ExtensionContext): void {
+		current = root;
+		const mainRoot = mainRootOf(root);
+		if (mainRoot) persistLock(mainRoot, root);
+		render(ctx);
+	}
+
 	pi.on("session_start", async (_event, ctx) => {
-		// In case pi was launched from inside a worktree dir, seed from cwd.
+		// Seed from cwd in case pi was launched from inside a worktree dir…
 		const cwdRoot = git(ctx.cwd, "rev-parse", "--show-toplevel");
-		if (cwdRoot && isLinkedWorktree(cwdRoot)) current = cwdRoot;
+		if (cwdRoot && isLinkedWorktree(cwdRoot)) {
+			lockOn(cwdRoot, ctx);
+			return;
+		}
+		// …else recover the last worktree shown for this repo. Without this,
+		// /reload would drop the lock: the module re-imports with fresh state
+		// and the session cwd is usually the main repo, not the worktree.
+		if (!current && cwdRoot) {
+			const mainRoot = mainRootOf(cwdRoot);
+			const saved = mainRoot ? loadState()[mainRoot] : undefined;
+			if (saved && isLinkedWorktree(saved.worktree)) {
+				lockOn(saved.worktree, ctx);
+				return;
+			}
+		}
+		render(ctx);
+	});
+
+	// Refresh without tool activity (review age, CI TTL, lock recovery) — fires
+	// on every user message. render() is cheap: local git/fs reads, cached CI.
+	pi.on("turn_start", async (_event, ctx) => {
 		render(ctx);
 	});
 
@@ -377,10 +444,7 @@ export default function worktreeIndicator(pi: ExtensionAPI): void {
 
 		const root = extractWorktreeRoot(blob, ctx.cwd);
 		if (!root || !isLinkedWorktree(root)) return;
-		if (root !== current) {
-			current = root;
-			render(ctx);
-		}
+		if (root !== current) lockOn(root, ctx);
 	}
 
 	// Lock onto the worktree the agent is actually operating in. Watches the
