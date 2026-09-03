@@ -9,11 +9,12 @@
  *
  * Two extra segments ride along when the worktree is on a real branch:
  *
- *   review ✓ <age>  — a /review (skills/review) run completed for this branch
- *                      (recorded under ~/.pi/agent/reviews/<repo>/<branch>/).
- *                      Warning-colored + "(stale)" when HEAD moved since the
- *                      review. review ◌ = running, review ✗ = died/failed,
- *                      muted review – = never reviewed.
+ *   review ✓ <age>  — a /review (skills/review) run FINISHED for this branch
+ *                      (records under ~/.pi/agent/reviews/<repo>/<branch>/);
+ *                      age is time since it finished. Warning-colored +
+ *                      "(stale)" when HEAD moved since that review. review ◌
+ *                      = a run is live now; review ✗ = attempts exist but
+ *                      none ever finished; muted review – = never attempted.
  *   CI ✓ / ✗ <name> / ◌ / – — GitHub checks for the branch via gh: PR checks
  *                      when a PR exists, else workflow runs for the pushed
  *                      branch. Muted – = nothing has run. Omitted entirely
@@ -166,8 +167,11 @@ type ReviewState =
 	| { status: "broken" };
 
 /**
- * Latest /review run for this branch, from review.sh's records. null = never
- * reviewed. "broken" = died without finishing (no done marker, dead pid).
+ * Review state for this branch, from review.sh's records — based on what has
+ * FINISHED, not merely started. Priority: a live run → running; else the
+ * newest completed run (exit 0) → done (age is time since it finished, stale
+ * if HEAD moved since ITS recorded head); else started-but-never-finished
+ * attempts → broken; null = never reviewed at all.
  */
 function reviewRecord(wtRoot: string, branch: string, head: string | null): ReviewState | null {
 	const slug = repoSlug(wtRoot);
@@ -178,20 +182,44 @@ function reviewRecord(wtRoot: string, branch: string, head: string | null): Revi
 	} catch {
 		return null;
 	}
-	const newest = entries.filter((n) => /^\d+$/.test(n)).sort().at(-1);
-	if (!newest) return null;
-	const runDir = resolve(REVIEWS_DIR, slug, branch.replace(/\//g, "-"), newest);
-	const done = readKv(resolve(runDir, "done"));
-	if (done.finished) {
-		const meta = readKv(resolve(runDir, "meta"));
+	const dirs = entries.filter((n) => /^\d+$/.test(n)).sort(); // asc by start time
+	if (!dirs.length) return null;
+
+	let completed: { finishedSec: number; metaHead: string } | null = null;
+	let running: { pid: number; startedSec: number } | null = null;
+	let attempted = false;
+	for (const name of dirs) {
+		const runDir = resolve(REVIEWS_DIR, slug, branch.replace(/\//g, "-"), name);
+		const done = readKv(resolve(runDir, "done"));
+		if (done.finished && (!done.exit || done.exit === "0")) {
+			// Ascending scan: each completed run overwrites the last, so the
+			// newest finished review wins.
+			completed = {
+				finishedSec: Number(done.finished) || 0,
+				metaHead: readKv(resolve(runDir, "meta")).head ?? "",
+			};
+			continue;
+		}
+		attempted = true; // failed exit, or unfinished
+		const pid = Number(readKv(resolve(runDir, "pid")).pid);
+		if (!done.finished && pid > 0 && pidAlive(pid)) running = { pid, startedSec: Number(name) };
+	}
+
+	// A live run only outranks a finished review when it started AFTER that
+	// review finished — an older still-"running" entry is abandoned (stuck
+	// pid / reused pid), not news.
+	if (running && (!completed || running.startedSec >= completed.finishedSec)) {
+		return { status: "running" };
+	}
+	if (completed) {
 		return {
-			status: !done.exit || done.exit === "0" ? "done" : "broken",
-			finishedSec: Number(done.finished) || 0,
-			stale: Boolean(head && meta.head && meta.head !== head),
+			status: "done",
+			finishedSec: completed.finishedSec,
+			stale: Boolean(head && completed.metaHead && completed.metaHead !== head),
 		};
 	}
-	const pid = Number(readKv(resolve(runDir, "pid")).pid);
-	return pid > 0 && pidAlive(pid) ? { status: "running" } : { status: "broken" };
+	if (attempted) return { status: "broken" };
+	return null;
 }
 
 type CiStatus = "green" | "red" | "pending" | "none" | "unknown";
