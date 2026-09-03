@@ -8,9 +8,10 @@
  *   🌿 <repo>/<worktrees-dir>/<name>  ⎇ <branch>  #<issue> → #<pr>  rvw ✓ 12m  CI ✓
  *
  * Two extra segments ride along when the worktree is on a real branch, plus an
- * issue→PR link: a branch named after an issue (workon/stackon `i<N>-<slug>`,
- * `issue-N-…`, `N-…`) shows #<issue>; if that issue has open PRs on GitHub,
- * the first (lowest-numbered) one is appended as → #<pr>.
+ * → #<pr> link: the open PR whose head branch is this branch (workon flow:
+ * branch -> PR; no Fixes/Closes keyword needed), via REST, polled ~once a
+ * minute. Shown alongside #<issue> when the branch name encodes one
+ * (workon/stackon `i<N>-<slug>`, `issue-N-…`, `N-…`).
  *
  *   rvw ✓ <age>   — a /review (skills/review) run FINISHED for this branch
  *                      (records under ~/.pi/agent/reviews/<repo>/<branch>/);
@@ -114,6 +115,8 @@ const REVIEWS_DIR = process.env.PI_REVIEWS_DIR || resolve(homedir(), ".pi/agent/
 /** CI is polled on a repeating timer (not just at render time) so the bar
  * updates while the agent is idle. Unusable gh ("unknown") backs off. */
 const CI_POLL_MS = 10_000;
+/** PR number changes rarely — the poll looks it up at most this often. */
+const PR_POLL_MS = 60_000;
 const CI_UNKNOWN_BACKOFF_MS = 60_000;
 
 /**
@@ -233,16 +236,18 @@ type CiStatus = "green" | "red" | "pending" | "none" | "unknown";
 let ciCache: { key: string; status: CiStatus; detail?: string; at: number } | null = null;
 let ciBusy = false;
 
-// --- Issue → first open PR -------------------------------------------------
-// A workon/stackon branch `i<N>-<slug>` names its issue; if that issue has open
-// PRs (GitHub dev-panel links arrive as "cross-referenced" timeline events
-// from PRs), show the first (lowest-numbered) one.
+// --- Branch → open PR -------------------------------------------------------
+// The open PR whose head branch IS this branch (the workon flow: branch -> PR;
+// no Fixes/Closes keyword needed). Looked up via REST (`gh api pulls?head=`) —
+// GraphQL is avoided entirely because the poll timer's calls exhausted the
+// GraphQL rate limit with several sessions running. Polled at most once per
+// PR_POLL_MS (the PR number rarely changes); CI keeps its faster cadence.
 
 let issuePrCache: { key: string; pr: number | null; ok: boolean; at: number } | null = null;
 let issuePrBusy = false;
 const repoNameCache = new Map<string, string | null>(); // wtRoot -> owner/repo
 
-function kickIssuePrFetch(wtRoot: string, issue: string, key: string, ctx: ExtensionContext): void {
+function kickIssuePrFetch(wtRoot: string, branch: string, key: string, ctx: ExtensionContext): void {
 	if (issuePrBusy) return;
 	issuePrBusy = true;
 	const opts = { cwd: wtRoot, timeout: 15_000 };
@@ -251,35 +256,29 @@ function kickIssuePrFetch(wtRoot: string, issue: string, key: string, ctx: Exten
 		issuePrBusy = false;
 		render(ctx);
 	};
-	const withRepo = (repo: string) => {
+	const lookup = (repo: string) => {
+		const owner = repo.split("/")[0]!;
 		execFile(
 			"gh",
-			["api", `repos/${repo}/issues/${issue}/timeline`],
+			["api", `repos/${repo}/pulls?head=${owner}:${branch}&state=open`],
 			opts,
 			(_e, out) => {
-				const events = safeJson(out ?? "");
-				if (!Array.isArray(events)) {
+				const rows = safeJson(out ?? "");
+				if (!Array.isArray(rows)) {
 					settle(null, false);
 					return;
 				}
-				const prs = events
-					.filter(
-						(e): e is { source: { issue: { number: number; state: string; pull_request?: unknown } } } =>
-							!!e &&
-							(e as { event?: string }).event === "cross-referenced" &&
-							!!(e as { source?: { issue?: { pull_request?: unknown } } }).source?.issue?.pull_request &&
-							(e as { source: { issue: { state: string } } }).source.issue.state === "open",
-					)
-					.map((e) => e.source.issue.number)
-					.filter((n) => Number.isInteger(n) && n > 0);
-				settle(prs.length ? Math.min(...prs) : null, true);
+				const nums = rows
+					.map((r) => (r as { number?: unknown }).number)
+					.filter((n): n is number => typeof n === "number" && Number.isInteger(n) && n > 0);
+				settle(nums.length ? Math.min(...nums) : null, true);
 			},
 		);
 	};
 	const cached = repoNameCache.get(wtRoot);
 	if (cached !== undefined) {
-		if (cached) withRepo(cached);
-		else settle(null, false);
+		if (cached) lookup(cached);
+		else settle(null, false); // not a GitHub repo / gh unusable
 		return;
 	}
 	execFile("gh", ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], opts, (err, out) => {
@@ -290,17 +289,17 @@ function kickIssuePrFetch(wtRoot: string, issue: string, key: string, ctx: Exten
 			return;
 		}
 		repoNameCache.set(wtRoot, repo);
-		withRepo(repo);
+		lookup(repo);
 	});
 }
 
 /** `→ #<pr>` segment string, or "" when there is nothing to show. */
-function issuePrSegment(wtRoot: string, issue: string, ctx: ExtensionContext): string {
-	const key = `${wtRoot}|${issue}`;
+function issuePrSegment(wtRoot: string, branch: string, ctx: ExtensionContext): string {
+	const key = `${wtRoot}|${branch}`;
 	// Render-time fetch only on a NEW target (lock/branch switch); periodic
 	// refresh belongs to the poll timer — a TTL here would drift against the
 	// timer phase and silently stretch the refresh interval.
-	if (!issuePrCache || issuePrCache.key !== key) kickIssuePrFetch(wtRoot, issue, key, ctx);
+	if (!issuePrCache || issuePrCache.key !== key) kickIssuePrFetch(wtRoot, branch, key, ctx);
 	const c = issuePrCache?.key === key ? issuePrCache : null;
 	return c?.ok && c.pr ? `→ #${c.pr}` : "";
 }
@@ -425,13 +424,11 @@ function pollTick(): void {
 	const ciBackoff =
 		ciCache?.status === "unknown" && ciCache.key === key && Date.now() - ciCache.at < CI_UNKNOWN_BACKOFF_MS;
 	if (!ciBackoff) kickCiFetch(current, branch, key, lastCtx);
-	const issue = issueFromBranch(branch);
-	if (issue) {
-		const prKey = `${current}|${issue}`;
-		const prBackoff =
-			issuePrCache && !issuePrCache.ok && issuePrCache.key === prKey && Date.now() - issuePrCache.at < CI_UNKNOWN_BACKOFF_MS;
-		if (!prBackoff) kickIssuePrFetch(current, issue, prKey, lastCtx);
-	}
+	const prKey = `${current}|${branch}`;
+	const prSkip =
+		(issuePrCache?.key === prKey && Date.now() - issuePrCache.at < PR_POLL_MS) || // fresh enough
+		(issuePrCache && !issuePrCache.ok && issuePrCache.key === prKey && Date.now() - issuePrCache.at < CI_UNKNOWN_BACKOFF_MS);
+	if (!prSkip) kickIssuePrFetch(current, branch, prKey, lastCtx);
 	render(lastCtx);
 }
 
@@ -507,11 +504,9 @@ function render(ctx: ExtensionContext): void {
 		t.fg("success", info.branch),
 	];
 	const issue = issueFromBranch(info.branch);
-	if (issue) {
-		parts.push(t.fg("accent", `#${issue}`));
-		const pr = issuePrSegment(current, issue, ctx);
-		if (pr) parts.push(t.fg("accent", pr));
-	}
+	if (issue) parts.push(t.fg("accent", `#${issue}`));
+	const pr = issuePrSegment(current, info.branch, ctx);
+	if (pr) parts.push(t.fg("accent", pr));
 
 	// Review + CI segments (skipped on detached HEAD — nothing to key them to).
 	let pollable = false;
