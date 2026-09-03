@@ -132,13 +132,31 @@ else
 fi
 
 # --- Review record (persistent, for the footer indicator) ---
+# Record under the branch BEING REVIEWED, not the checkout's current branch:
+# PR reviews are typically launched from the main checkout (cwd on `main`),
+# while the footer indicator keys records by the worktree's branch. For a
+# PR number/URL, ask gh for the head branch + sha; for a branch name, resolve
+# it in git directly; for "local", the checkout branch is correct.
 PI_REVIEWS_DIR="${PI_REVIEWS_DIR:-$HOME/.pi/agent/reviews}"
-BRANCH_AT_LAUNCH="$(git -C "$WORKTREE" branch --show-current 2>/dev/null || true)"
-[ -n "$BRANCH_AT_LAUNCH" ] || BRANCH_AT_LAUNCH="detached"
+REVIEW_BRANCH=""
+REVIEW_HEAD=""
+if echo "$PR" | grep -qE '^[0-9]+$|github\.com/.*/pull/[0-9]'; then
+  NUM="$(echo "$PR" | grep -oE '[0-9]+$')"
+  PRJSON="$(gh pr view "$NUM" --json headRefName,headRefOid 2>/dev/null || true)"
+  REVIEW_BRANCH="$(echo "$PRJSON" | jq -r '.headRefName // empty' 2>/dev/null || true)"
+  REVIEW_HEAD="$(echo "$PRJSON" | jq -r '.headRefOid // empty' 2>/dev/null || true)"
+elif [ "$PR" != "local" ]; then
+  REVIEW_BRANCH="$PR"
+  REVIEW_HEAD="$(git -C "$WORKTREE" rev-parse --verify "$PR^{commit}" 2>/dev/null || true)"
+fi
+[ -n "$REVIEW_BRANCH" ] || REVIEW_BRANCH="$(git -C "$WORKTREE" branch --show-current 2>/dev/null || true)"
+[ -n "$REVIEW_HEAD" ] || REVIEW_HEAD="$(git -C "$WORKTREE" rev-parse HEAD 2>/dev/null || true)"
+[ -n "$REVIEW_BRANCH" ] || REVIEW_BRANCH="detached"
+BRANCH_AT_LAUNCH="$REVIEW_BRANCH"
 BRANCH_SLUG="${BRANCH_AT_LAUNCH//\//-}"
 REPO_SLUG="$(repo_slug "$WORKTREE" || true)"
 [ -n "$REPO_SLUG" ] || REPO_SLUG="unknown"
-HEAD_SHA="$(git -C "$WORKTREE" rev-parse HEAD 2>/dev/null || true)"
+HEAD_SHA="$REVIEW_HEAD"
 STARTED="$(date +%s)"
 RUN_DIR="$PI_REVIEWS_DIR/$REPO_SLUG/$BRANCH_SLUG/$STARTED"
 mkdir -p "$RUN_DIR"
