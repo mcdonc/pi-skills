@@ -18,6 +18,9 @@
  *                      when a PR exists, else workflow runs for the pushed
  *                      branch. Muted – = nothing has run. Omitted entirely
  *                      when gh can't answer (not a GitHub repo, no network).
+ *                      Polled on a 10s unref'd timer, so the bar (and the
+ *                      review age) refresh while the agent is idle; unusable
+ *                      gh backs off to one attempt per 60s.
  *
  * Detection tracks the agent's *actual* tool activity, not just the session
  * cwd: when the session is rooted at the main repo (the common case — /workon
@@ -100,8 +103,10 @@ function issueFromBranch(branch: string): string | null {
 /** Where review.sh records runs (same default as the script; overridable). */
 const REVIEWS_DIR = process.env.PI_REVIEWS_DIR || resolve(homedir(), ".pi/agent/reviews");
 
-/** CI results are cached per (worktree, branch, head) and refreshed at most this often. */
-const CI_TTL_MS = 60_000;
+/** CI is polled on a repeating timer (not just at render time) so the bar
+ * updates while the agent is idle. Unusable gh ("unknown") backs off. */
+const CI_POLL_MS = 10_000;
+const CI_UNKNOWN_BACKOFF_MS = 60_000;
 
 /**
  * Stable per-repo key matching repo_slug() in skills/review/scripts/review.sh:
@@ -264,7 +269,7 @@ function kickCiFetch(wtRoot: string, branch: string, key: string, ctx: Extension
 function ciSegment(wtRoot: string, branch: string, head: string, ctx: ExtensionContext): string | null {
 	const t = ctx.ui.theme;
 	const key = `${wtRoot}|${branch}|${head}`;
-	if (!ciCache || ciCache.key !== key || Date.now() - ciCache.at > CI_TTL_MS) kickCiFetch(wtRoot, branch, key, ctx);
+	if (!ciCache || ciCache.key !== key || Date.now() - ciCache.at > CI_POLL_MS) kickCiFetch(wtRoot, branch, key, ctx);
 	if (!ciCache || ciCache.key !== key) return t.fg("muted", "CI …");
 	const c = ciCache;
 	if (c.status === "green") return t.fg("success", "CI ✓");
@@ -279,6 +284,45 @@ function ciSegment(wtRoot: string, branch: string, head: string, ctx: ExtensionC
 // touched — the agent rarely switches worktrees mid-session, so this avoids
 // flicker.
 let current: string | null = null;
+
+// Latest context (for timer-driven renders) and the CI poll timer. The timer
+// is unref'd so it never keeps the process alive.
+let lastCtx: ExtensionContext | null = null;
+let lastStatusStr: string | null = null;
+let ciPollTimer: NodeJS.Timeout | null = null;
+
+function stopPoll(): void {
+	if (ciPollTimer) {
+		clearInterval(ciPollTimer);
+		ciPollTimer = null;
+	}
+}
+
+/** One poll tick: refresh CI for the locked worktree, then re-render (also
+ * refreshes review state and the time-since-reviewed age while idle). */
+function pollTick(): void {
+	if (!current || !lastCtx) {
+		stopPoll();
+		return;
+	}
+	const branch = git(current, "branch", "--show-current");
+	if (!branch || branch === "(detached)") return;
+	const head = git(current, "rev-parse", "HEAD");
+	if (!head) return;
+	const key = `${current}|${branch}|${head}`;
+	// Back off when gh can't answer for this repo — retry the same key rarely.
+	if (ciCache?.status === "unknown" && ciCache.key === key && Date.now() - ciCache.at < CI_UNKNOWN_BACKOFF_MS) {
+		return;
+	}
+	kickCiFetch(current, branch, key, lastCtx);
+	render(lastCtx);
+}
+
+function startPoll(): void {
+	if (ciPollTimer) return;
+	ciPollTimer = setInterval(pollTick, CI_POLL_MS);
+	ciPollTimer.unref?.();
+}
 
 /**
  * Persist the lock across /reload and new sessions: module state dies with a
@@ -326,6 +370,7 @@ function mainRootOf(wtRoot: string): string | null {
  */
 function render(ctx: ExtensionContext): void {
 	if (!ctx.hasUI) return;
+	lastCtx = ctx;
 
 	let info: { rel: string; repo: string; branch: string } | null = null;
 	if (current && existsSync(current) && isLinkedWorktree(current)) {
@@ -336,7 +381,11 @@ function render(ctx: ExtensionContext): void {
 	}
 
 	if (!info || !current) {
-		ctx.ui.setStatus("worktree-indicator", undefined);
+		stopPoll();
+		if (lastStatusStr !== null) {
+			lastStatusStr = null;
+			ctx.ui.setStatus("worktree-indicator", undefined);
+		}
 		return;
 	}
 
@@ -351,9 +400,11 @@ function render(ctx: ExtensionContext): void {
 	if (issue) parts.push(t.fg("accent", `#${issue}`));
 
 	// Review + CI segments (skipped on detached HEAD — nothing to key them to).
+	let pollable = false;
 	if (info.branch !== "(detached)") {
 		const head = git(current, "rev-parse", "HEAD");
 		if (head) {
+			pollable = true;
 			const rv = reviewRecord(current, info.branch, head);
 			parts.push(
 				rv?.status === "done"
@@ -369,7 +420,16 @@ function render(ctx: ExtensionContext): void {
 		}
 	}
 
-	ctx.ui.setStatus("worktree-indicator", parts.join("  "));
+	// Keep the 10s poll running only while there is something live to show.
+	if (pollable) startPoll();
+	else stopPoll();
+
+	// Dedupe identical strings so the poll can re-render freely without UI churn.
+	const str = parts.join("  ");
+	if (str !== lastStatusStr) {
+		lastStatusStr = str;
+		ctx.ui.setStatus("worktree-indicator", str);
+	}
 }
 
 export default function worktreeIndicator(pi: ExtensionAPI): void {
@@ -463,6 +523,7 @@ export default function worktreeIndicator(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", async () => {
-		// Status slots are per-session; nothing to clean up.
+		stopPoll();
+		lastCtx = null;
 	});
 }
