@@ -5,16 +5,19 @@
  * inside a git linked worktree — the state you're in when /workon or /merge
  * create a PR-producing worktree. Renders:
  *
- *   🌿 <repo>/<worktrees-dir>/<name>  ⎇ <branch>  #<issue>  review ✓ 12m  CI ✓
+ *   🌿 <repo>/<worktrees-dir>/<name>  ⎇ <branch>  #<issue> → #<pr>  rvw ✓ 12m  CI ✓
  *
- * Two extra segments ride along when the worktree is on a real branch:
+ * Two extra segments ride along when the worktree is on a real branch, plus an
+ * issue→PR link: a branch named after an issue (workon/stackon `i<N>-<slug>`,
+ * `issue-N-…`, `N-…`) shows #<issue>; if that issue has open PRs on GitHub,
+ * the first (lowest-numbered) one is appended as → #<pr>.
  *
- *   review ✓ <age>  — a /review (skills/review) run FINISHED for this branch
+ *   rvw ✓ <age>   — a /review (skills/review) run FINISHED for this branch
  *                      (records under ~/.pi/agent/reviews/<repo>/<branch>/);
  *                      age is time since it finished. Warning-colored +
- *                      "(stale)" when HEAD moved since that review. review ◌
- *                      = a run is live now; review ✗ = attempts exist but
- *                      none ever finished; muted review – = never attempted.
+ *                      "(stale)" when HEAD moved since that review. rvw ◌
+ *                      = a run is live now; rvw ✗ = attempts exist but
+ *                      none ever finished; muted rvw – = never attempted.
  *   CI ✓ / ✗ <name> / ◌ / – — GitHub checks for the branch via gh: PR checks
  *                      when a PR exists, else workflow runs for the pushed
  *                      branch. Muted – = nothing has run. Omitted entirely
@@ -37,8 +40,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { execFile, execSync } from "node:child_process";
 import { homedir } from "node:os";
-import { basename, dirname, relative, resolve } from "node:path";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { basename, relative, resolve } from "node:path";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 
 // Matches the root of a linked worktree inside a path or command string —
 // absolute (`/home/x/repo/.worktrees/name`) or relative (`repo/.worktrees/name`,
@@ -91,9 +94,13 @@ function worktreeInfo(
 	return { rel, repo: basename(mainRoot) || "repo", branch };
 }
 
-/** Parse an issue number out of a branch name like `issue-1410-…` or `1410-…`. */
+/** Parse an issue number out of a branch name: workon/stackon `i<N>-<slug>`,
+ * `issue-<N>-…`, or `<N>-…`. */
 function issueFromBranch(branch: string): string | null {
-	const m = branch.match(/(?:^|[-/])issue-(\d+)\b/i) || branch.match(/^(\d+)-/);
+	const m =
+		branch.match(/(?:^|[-/])issue-(\d+)\b/i) ||
+		branch.match(/^i(\d+)-/) ||
+		branch.match(/^(\d+)-/);
 	return m ? m[1]! : null;
 }
 
@@ -226,6 +233,78 @@ type CiStatus = "green" | "red" | "pending" | "none" | "unknown";
 let ciCache: { key: string; status: CiStatus; detail?: string; at: number } | null = null;
 let ciBusy = false;
 
+// --- Issue → first open PR -------------------------------------------------
+// A workon/stackon branch `i<N>-<slug>` names its issue; if that issue has open
+// PRs (GitHub dev-panel links arrive as "cross-referenced" timeline events
+// from PRs), show the first (lowest-numbered) one.
+
+let issuePrCache: { key: string; pr: number | null; ok: boolean; at: number } | null = null;
+let issuePrBusy = false;
+const repoNameCache = new Map<string, string | null>(); // wtRoot -> owner/repo
+
+function kickIssuePrFetch(wtRoot: string, issue: string, key: string, ctx: ExtensionContext): void {
+	if (issuePrBusy) return;
+	issuePrBusy = true;
+	const opts = { cwd: wtRoot, timeout: 15_000 };
+	const settle = (pr: number | null, ok: boolean) => {
+		issuePrCache = { key, pr, ok, at: Date.now() };
+		issuePrBusy = false;
+		render(ctx);
+	};
+	const withRepo = (repo: string) => {
+		execFile(
+			"gh",
+			["api", `repos/${repo}/issues/${issue}/timeline`],
+			opts,
+			(_e, out) => {
+				const events = safeJson(out ?? "");
+				if (!Array.isArray(events)) {
+					settle(null, false);
+					return;
+				}
+				const prs = events
+					.filter(
+						(e): e is { source: { issue: { number: number; state: string; pull_request?: unknown } } } =>
+							!!e &&
+							(e as { event?: string }).event === "cross-referenced" &&
+							!!(e as { source?: { issue?: { pull_request?: unknown } } }).source?.issue?.pull_request &&
+							(e as { source: { issue: { state: string } } }).source.issue.state === "open",
+					)
+					.map((e) => e.source.issue.number)
+					.filter((n) => Number.isInteger(n) && n > 0);
+				settle(prs.length ? Math.min(...prs) : null, true);
+			},
+		);
+	};
+	const cached = repoNameCache.get(wtRoot);
+	if (cached !== undefined) {
+		if (cached) withRepo(cached);
+		else settle(null, false);
+		return;
+	}
+	execFile("gh", ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], opts, (err, out) => {
+		const repo = (out ?? "").trim();
+		if (err || !/^[\w.-]+\/[\w.-]+$/.test(repo)) {
+			repoNameCache.set(wtRoot, null);
+			settle(null, false); // not a GitHub repo / gh unusable
+			return;
+		}
+		repoNameCache.set(wtRoot, repo);
+		withRepo(repo);
+	});
+}
+
+/** `→ #<pr>` segment string, or "" when there is nothing to show. */
+function issuePrSegment(wtRoot: string, issue: string, ctx: ExtensionContext): string {
+	const key = `${wtRoot}|${issue}`;
+	// Render-time fetch only on a NEW target (lock/branch switch); periodic
+	// refresh belongs to the poll timer — a TTL here would drift against the
+	// timer phase and silently stretch the refresh interval.
+	if (!issuePrCache || issuePrCache.key !== key) kickIssuePrFetch(wtRoot, issue, key, ctx);
+	const c = issuePrCache?.key === key ? issuePrCache : null;
+	return c?.ok && c.pr ? `→ #${c.pr}` : "";
+}
+
 /** Aggregate `gh pr checks --json bucket,name` rows. */
 function combineChecks(rows: Array<{ bucket?: string; name?: string }>): { status: CiStatus; detail?: string } {
 	const fail = rows.find((r) => r.bucket === "fail" || r.bucket === "cancel");
@@ -297,7 +376,9 @@ function kickCiFetch(wtRoot: string, branch: string, key: string, ctx: Extension
 function ciSegment(wtRoot: string, branch: string, head: string, ctx: ExtensionContext): string | null {
 	const t = ctx.ui.theme;
 	const key = `${wtRoot}|${branch}|${head}`;
-	if (!ciCache || ciCache.key !== key || Date.now() - ciCache.at > CI_POLL_MS) kickCiFetch(wtRoot, branch, key, ctx);
+	// Render-time fetch only on a NEW target; periodic refresh is the timer's
+	// job (a TTL here drifts against the timer phase — see pollTick).
+	if (!ciCache || ciCache.key !== key) kickCiFetch(wtRoot, branch, key, ctx);
 	if (!ciCache || ciCache.key !== key) return t.fg("muted", "CI …");
 	const c = ciCache;
 	if (c.status === "green") return t.fg("success", "CI ✓");
@@ -337,12 +418,20 @@ function pollTick(): void {
 	if (!branch || branch === "(detached)") return;
 	const head = git(current, "rev-parse", "HEAD");
 	if (!head) return;
+	// The timer owns periodic refresh (render-time fetches are key-change
+	// only), so kick unconditionally here — except inside backoff windows for
+	// targets gh can't answer, which retry at the slower backoff rate.
 	const key = `${current}|${branch}|${head}`;
-	// Back off when gh can't answer for this repo — retry the same key rarely.
-	if (ciCache?.status === "unknown" && ciCache.key === key && Date.now() - ciCache.at < CI_UNKNOWN_BACKOFF_MS) {
-		return;
+	const ciBackoff =
+		ciCache?.status === "unknown" && ciCache.key === key && Date.now() - ciCache.at < CI_UNKNOWN_BACKOFF_MS;
+	if (!ciBackoff) kickCiFetch(current, branch, key, lastCtx);
+	const issue = issueFromBranch(branch);
+	if (issue) {
+		const prKey = `${current}|${issue}`;
+		const prBackoff =
+			issuePrCache && !issuePrCache.ok && issuePrCache.key === prKey && Date.now() - issuePrCache.at < CI_UNKNOWN_BACKOFF_MS;
+		if (!prBackoff) kickIssuePrFetch(current, issue, prKey, lastCtx);
 	}
-	kickCiFetch(current, branch, key, lastCtx);
 	render(lastCtx);
 }
 
@@ -352,44 +441,36 @@ function startPoll(): void {
 	ciPollTimer.unref?.();
 }
 
+/** Scan a blob of text (a command, path, or JSON) for a `.worktrees/<name>`
+ * root — absolute (`/home/x/repo/.worktrees/name`) or relative, resolved
+ * against `cwd`. */
+function extractWorktreeRoot(text: string, cwd: string): string | null {
+	const m = text.match(WORKTREE_PATH_RE);
+	if (!m) return null;
+	return resolve(cwd, m[2]!);
+}
+
 /**
- * Recover the lock across /reload ONLY: module state dies with a reload
- * (fresh import), and session_start can only re-seed from the session cwd —
- * which is usually the *main* repo, not the worktree. Fresh sessions must NOT
- * inherit this: the bar tracks *this* session's actual activity, and a new
- * session that never touches a worktree should show nothing at all.
+ * Rebuild the lock after /reload by replaying THIS session's own transcript
+ * (ctx.sessionManager.getEntries()): module state dies with a reload (fresh
+ * import), and the session cwd is usually the main repo, not the worktree.
+ * Transcript replay is per-session by construction — concurrent sessions in
+ * one repo can never inherit each other's worktree, and no state file is
+ * needed. Fresh sessions have empty transcripts and show nothing until the
+ * agent actually touches a `.worktrees/<name>` path.
  */
-const STATE_FILE = resolve(homedir(), ".pi/agent/worktree-indicator-state.json");
-
-function loadState(): Record<string, { worktree: string; at: number }> {
+function lockFromTranscript(ctx: ExtensionContext): string | null {
 	try {
-		return JSON.parse(readFileSync(STATE_FILE, "utf8"));
+		const entries: unknown[] = ctx.sessionManager?.getEntries?.() ?? [];
+		// Newest first, bounded — the most recent worktree reference wins.
+		for (let i = entries.length - 1; i >= 0 && i >= entries.length - 200; i--) {
+			const root = extractWorktreeRoot(JSON.stringify(entries[i]) ?? "", ctx.cwd);
+			if (root && isLinkedWorktree(root)) return root;
+		}
 	} catch {
-		return {};
+		// Transcript access is best-effort; fall through to no lock.
 	}
-}
-
-function persistLock(mainRoot: string, wtRoot: string): void {
-	try {
-		const state = loadState();
-		state[mainRoot] = { worktree: wtRoot, at: Date.now() };
-		// Prune dead entries; keep only the most recent 50.
-		const alive = Object.entries(state)
-			.filter(([, v]) => existsSync(v.worktree))
-			.sort((a, b) => b[1].at - a[1].at)
-			.slice(0, 50);
-		mkdirSync(dirname(STATE_FILE), { recursive: true });
-		writeFileSync(STATE_FILE, JSON.stringify(Object.fromEntries(alive), null, "\t"));
-	} catch {
-		// State persistence is best-effort; never break rendering over it.
-	}
-}
-
-/** Main-repo root for a worktree (from the shared git dir), or null. */
-function mainRootOf(wtRoot: string): string | null {
-	const common = git(wtRoot, "rev-parse", "--git-common-dir");
-	if (!common) return null;
-	return resolve(wtRoot, common).replace(/\/\.git\/?$/, "") || null;
+	return null;
 }
 
 /**
@@ -426,7 +507,11 @@ function render(ctx: ExtensionContext): void {
 		t.fg("success", info.branch),
 	];
 	const issue = issueFromBranch(info.branch);
-	if (issue) parts.push(t.fg("accent", `#${issue}`));
+	if (issue) {
+		parts.push(t.fg("accent", `#${issue}`));
+		const pr = issuePrSegment(current, issue, ctx);
+		if (pr) parts.push(t.fg("accent", pr));
+	}
 
 	// Review + CI segments (skipped on detached HEAD — nothing to key them to).
 	let pollable = false;
@@ -435,14 +520,14 @@ function render(ctx: ExtensionContext): void {
 		if (head) {
 			pollable = true;
 			const rv = reviewRecord(current, info.branch, head);
-			parts.push(
+				parts.push(
 				rv?.status === "done"
-				? t.fg(rv.stale ? "warning" : "success", `review ✓ ${relTime(rv.finishedSec)}${rv.stale ? " (stale)" : ""}`)
+				? t.fg(rv.stale ? "warning" : "success", `rvw ✓ ${relTime(rv.finishedSec)}${rv.stale ? " (stale)" : ""}`)
 				: rv?.status === "running"
-					? t.fg("accent", "review ◌")
+					? t.fg("accent", "rvw ◌")
 					: rv?.status === "broken"
-						? t.fg("error", "review ✗")
-						: t.fg("muted", "review –"),
+						? t.fg("error", "rvw ✗")
+						: t.fg("muted", "rvw –"),
 			);
 			const ci = ciSegment(current, info.branch, head, ctx);
 			if (ci) parts.push(ci);
@@ -462,21 +547,10 @@ function render(ctx: ExtensionContext): void {
 }
 
 export default function worktreeIndicator(pi: ExtensionAPI): void {
-	/** Scan a blob of text (a command or path) for a `.worktrees/<name>` root. */
-	function extractWorktreeRoot(text: string, cwd: string): string | null {
-		const m = text.match(WORKTREE_PATH_RE);
-		if (!m) return null;
-		// Resolve relative hits (`.worktrees/name`, `repo/.worktrees/name`)
-		// against the session cwd — tool paths and commands are frequently
-		// relative, which the old absolute-only regex never matched.
-		return resolve(cwd, m[2]!);
-	}
 
-	/** Lock onto a worktree root: set module state, persist, re-render. */
+	/** Lock onto a worktree root: set module state, re-render. */
 	function lockOn(root: string, ctx: ExtensionContext): void {
 		current = root;
-		const mainRoot = mainRootOf(root);
-		if (mainRoot) persistLock(mainRoot, root);
 		render(ctx);
 	}
 
@@ -487,15 +561,13 @@ export default function worktreeIndicator(pi: ExtensionAPI): void {
 			lockOn(cwdRoot, ctx);
 			return;
 		}
-		// …else recover the lock this session held, but only for /reload — the
-		// same session whose module state just got wiped. A new/resumed session
-		// starts clean: no inherited worktree until the agent actually touches
-		// a `.worktrees/<name>` path.
-		if (event.reason === "reload" && !current && cwdRoot) {
-			const mainRoot = mainRootOf(cwdRoot);
-			const saved = mainRoot ? loadState()[mainRoot] : undefined;
-			if (saved && isLinkedWorktree(saved.worktree)) {
-				lockOn(saved.worktree, ctx);
+		// …else, on /reload only, rebuild the lock this session had by replaying
+		// its own transcript. Fresh/resumed sessions start clean: no inherited
+		// worktree until the agent actually touches a `.worktrees/<name>` path.
+		if (event.reason === "reload" && !current) {
+			const fromTranscript = lockFromTranscript(ctx);
+			if (fromTranscript) {
+				lockOn(fromTranscript, ctx);
 				return;
 			}
 		}
