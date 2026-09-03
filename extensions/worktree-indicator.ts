@@ -325,10 +325,11 @@ function startPoll(): void {
 }
 
 /**
- * Persist the lock across /reload and new sessions: module state dies with a
- * reload (fresh import), and session_start can only re-seed from the session
- * cwd — which is usually the *main* repo, not the worktree. The state file
- * remembers, per main repo, the last worktree we showed.
+ * Recover the lock across /reload ONLY: module state dies with a reload
+ * (fresh import), and session_start can only re-seed from the session cwd —
+ * which is usually the *main* repo, not the worktree. Fresh sessions must NOT
+ * inherit this: the bar tracks *this* session's actual activity, and a new
+ * session that never touches a worktree should show nothing at all.
  */
 const STATE_FILE = resolve(homedir(), ".pi/agent/worktree-indicator-state.json");
 
@@ -451,17 +452,18 @@ export default function worktreeIndicator(pi: ExtensionAPI): void {
 		render(ctx);
 	}
 
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", async (event, ctx) => {
 		// Seed from cwd in case pi was launched from inside a worktree dir…
 		const cwdRoot = git(ctx.cwd, "rev-parse", "--show-toplevel");
 		if (cwdRoot && isLinkedWorktree(cwdRoot)) {
 			lockOn(cwdRoot, ctx);
 			return;
 		}
-		// …else recover the last worktree shown for this repo. Without this,
-		// /reload would drop the lock: the module re-imports with fresh state
-		// and the session cwd is usually the main repo, not the worktree.
-		if (!current && cwdRoot) {
+		// …else recover the lock this session held, but only for /reload — the
+		// same session whose module state just got wiped. A new/resumed session
+		// starts clean: no inherited worktree until the agent actually touches
+		// a `.worktrees/<name>` path.
+		if (event.reason === "reload" && !current && cwdRoot) {
 			const mainRoot = mainRootOf(cwdRoot);
 			const saved = mainRoot ? loadState()[mainRoot] : undefined;
 			if (saved && isLinkedWorktree(saved.worktree)) {
