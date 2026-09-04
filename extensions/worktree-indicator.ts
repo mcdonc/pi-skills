@@ -277,6 +277,11 @@ function kickIssuePrFetch(wtRoot: string, branch: string, key: string, ctx: Exte
 	issuePrBusy = true;
 	const opts = { cwd: wtRoot, timeout: 15_000 };
 	const settle = (pr: number | null, ok: boolean) => {
+		// The CI fetch gates its `gh pr checks` path on this open-PR fact — if it
+		// just changed (e.g. the PR lookup landed after CI's first fetch), drop
+		// the CI cache so the next render re-kicks CI with correct knowledge.
+		const was = issuePrCache?.key === key ? issuePrCache.pr : undefined;
+		if (was !== undefined ? was !== pr : true) ciCache = null;
 		issuePrCache = { key, pr, ok, at: Date.now() };
 		issuePrBusy = false;
 		render(ctx);
@@ -378,22 +383,31 @@ function kickCiFetch(wtRoot: string, branch: string, head: string, key: string, 
 		ciBusy = false;
 		render(ctx);
 	};
-	execFile("gh", ["pr", "checks", branch, "--json", "bucket,name"], opts, (err, stdout) => {
-		const checks = safeJson(stdout ?? "");
-		if (Array.isArray(checks) && checks.length) {
-			const { status, detail } = combineChecks(checks);
-			settle(status, detail);
-			return;
-		}
-		execFile("gh", ["run", "list", "--branch", branch, "--limit", "5", "--json", "status,conclusion,workflowName,headSha"], opts, (_e2, out2) => {
-			const runs = safeJson(out2 ?? "");
-			if (!Array.isArray(runs)) {
-				settle("unknown");
+	// `gh pr checks <branch>` resolves the branch's latest PR even when CLOSED,
+	// returning a dead attempt's checks — so only use it when the branch has a
+	// live OPEN PR (the PR segment's REST lookup tracks that). Otherwise judge
+	// by workflow runs filtered to the current head sha.
+	const openPr = issuePrCache?.key === `${wtRoot}|${branch}` && issuePrCache.ok ? issuePrCache.pr : null;
+	if (openPr) {
+		execFile("gh", ["pr", "checks", branch, "--json", "bucket,name"], opts, (_err, stdout) => {
+			const checks = safeJson(stdout ?? "");
+			if (Array.isArray(checks) && checks.length) {
+				const { status, detail } = combineChecks(checks);
+				settle(status, detail);
 				return;
 			}
-			const { status, detail } = combineRuns(runs, head);
-			settle(status, detail);
+			settle("none");
 		});
+		return;
+	}
+	execFile("gh", ["run", "list", "--branch", branch, "--limit", "5", "--json", "status,conclusion,workflowName,headSha"], opts, (_e2, out2) => {
+		const runs = safeJson(out2 ?? "");
+		if (!Array.isArray(runs)) {
+			settle("unknown");
+			return;
+		}
+		const { status, detail } = combineRuns(runs, head);
+		settle(status, detail);
 	});
 }
 
