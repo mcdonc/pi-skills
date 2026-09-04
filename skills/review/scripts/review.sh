@@ -15,9 +15,9 @@
 #                   - "local"                         -> reviews main...HEAD diff
 #   --prompt      Path to the review mandate (markdown). Required. The agent is
 #                 expected to have tailored references/review-prompt.md for the PR.
-#   --model       pi model as provider/id (default z.ai/glm-5.3; e.g.
-#                 z.ai/glm-5.3, openai/o3-pro).
-#                 Defaults to pi's configured default.
+#   --model       pi model as provider/id (e.g. z.ai/glm-5.3, openai/o3-pro).
+#                 Default: pi's configured default model (from
+#                 ~/.pi/agent/settings.json) — the model in use by pi.
 #   --thinking    off|minimal|low|medium|high|xhigh (default: high).
 #   --blind       Pass --no-context-files --no-skills so the reviewer has NO
 #                 project context — a truly blind read of the diff alone. By
@@ -67,7 +67,7 @@ repo_slug() {
 
 PR=""
 PROMPT=""
-MODEL="z.ai/glm-5.3"
+MODEL=""
 THINKING="high"
 BLIND=0
 WORKTREE=""
