@@ -68,6 +68,20 @@ function git(cwd: string, ...args: string[]): string | null {
 	}
 }
 
+/** Run a git command for its exit status (empty stdout is normal). */
+function gitOk(cwd: string, ...args: string[]): boolean {
+	try {
+		execSync(["git", ...args].join(" "), {
+			cwd,
+			stdio: ["ignore", "ignore", "ignore"],
+			timeout: 2000,
+		});
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 /** True if `wtRoot` is a git linked worktree (`.git` is a regular file). */
 function isLinkedWorktree(wtRoot: string): boolean {
 	try {
@@ -178,10 +192,13 @@ type ReviewState =
 
 /**
  * Review state for this branch, from review.sh's records — based on what has
- * FINISHED, not merely started. Priority: a live run → running; else the
- * newest completed run (exit 0) → done (age is time since it finished, stale
- * if HEAD moved since ITS recorded head); else started-but-never-finished
- * attempts → broken; null = never reviewed at all.
+ * FINISHED, not merely started, and only runs whose recorded head is an
+ * ANCESTOR of (or equal to) the current HEAD: a fresh attempt on a reused
+ * branch name carries none of the abandoned attempt's commits, so its old
+ * review must not count (same rule as workon's review skip-check). Priority:
+ * a live run → running; else the newest completed run (exit 0) → done (age is
+ * time since it finished, stale if HEAD moved past its recorded head); else
+ * started-but-never-finished attempts → broken; null = nothing applicable.
  */
 function reviewRecord(wtRoot: string, branch: string, head: string | null): ReviewState | null {
 	const slug = repoSlug(wtRoot);
@@ -195,21 +212,29 @@ function reviewRecord(wtRoot: string, branch: string, head: string | null): Revi
 	const dirs = entries.filter((n) => /^\d+$/.test(n)).sort(); // asc by start time
 	if (!dirs.length) return null;
 
+	// Does this run apply to the current branch contents? (head is an
+	// ancestor of or equal to the current HEAD; empty/unknown head counts
+	// only when it equals HEAD — records predate the ancestor rule.)
+	const applies = (metaHead: string): boolean =>
+		!!metaHead && (metaHead === head || (!!head && gitOk(wtRoot, "merge-base", "--is-ancestor", metaHead, head)));
+
 	let completed: { finishedSec: number; metaHead: string } | null = null;
 	let running: { pid: number; startedSec: number } | null = null;
 	let attempted = false;
 	for (const name of dirs) {
 		const runDir = resolve(REVIEWS_DIR, slug, branch.replace(/\//g, "-"), name);
 		const done = readKv(resolve(runDir, "done"));
+		const metaHead = readKv(resolve(runDir, "meta")).head ?? "";
 		if (done.finished && (!done.exit || done.exit === "0")) {
 			// Ascending scan: each completed run overwrites the last, so the
-			// newest finished review wins.
-			completed = {
-				finishedSec: Number(done.finished) || 0,
-				metaHead: readKv(resolve(runDir, "meta")).head ?? "",
-			};
+			// newest finished review wins. Non-ancestor runs are invisible —
+			// they reviewed commits this branch no longer contains.
+			if (applies(metaHead)) {
+				completed = { finishedSec: Number(done.finished) || 0, metaHead };
+			}
 			continue;
 		}
+		if (!applies(metaHead)) continue; // abandoned attempt on dead commits
 		attempted = true; // failed exit, or unfinished
 		const pid = Number(readKv(resolve(runDir, "pid")).pid);
 		if (!done.finished && pid > 0 && pidAlive(pid)) running = { pid, startedSec: Number(name) };
@@ -312,15 +337,20 @@ function combineChecks(rows: Array<{ bucket?: string; name?: string }>): { statu
 	return { status: "green" }; // only pass/skipping left
 }
 
-/** Aggregate `gh run list --json status,conclusion,workflowName` rows (newest first). */
+/** Aggregate `gh run list --json status,conclusion,workflowName,headSha` rows
+ * (newest first). Runs from OTHER head commits are dropped first — a reused
+ * branch name must not inherit CI from an abandoned attempt's commits. */
 const BAD_CONCLUSIONS = ["failure", "timed_out", "startup_failure", "cancelled"];
 function combineRuns(
-	rows: Array<{ status?: string; conclusion?: string | null; workflowName?: string }>,
+	rows: Array<{ status?: string; conclusion?: string | null; workflowName?: string; headSha?: string }>,
+	head?: string,
 ): { status: CiStatus; detail?: string } {
-	const bad = rows.find((r) => r.conclusion && BAD_CONCLUSIONS.includes(r.conclusion!));
+	const mine = head ? rows.filter((r) => r.headSha === head) : rows;
+	if (!mine.length) return { status: "none" };
+	const bad = mine.find((r) => r.conclusion && BAD_CONCLUSIONS.includes(r.conclusion!));
 	if (bad) return { status: "red", detail: bad.workflowName };
-	if (rows.some((r) => !r.conclusion)) return { status: "pending" }; // in_progress / queued
-	if (rows.some((r) => r.conclusion === "success")) return { status: "green" };
+	if (mine.some((r) => !r.conclusion)) return { status: "pending" }; // in_progress / queued
+	if (mine.some((r) => r.conclusion === "success")) return { status: "green" };
 	return { status: "none" };
 }
 
@@ -339,7 +369,7 @@ function safeJson(out: string): unknown {
  * branch as the no-PR fallback (pushed branches). "unknown" (gh unusable)
  * omits the segment entirely.
  */
-function kickCiFetch(wtRoot: string, branch: string, key: string, ctx: ExtensionContext): void {
+function kickCiFetch(wtRoot: string, branch: string, head: string, key: string, ctx: ExtensionContext): void {
 	if (ciBusy) return;
 	ciBusy = true;
 	const opts = { cwd: wtRoot, timeout: 15_000 };
@@ -355,17 +385,13 @@ function kickCiFetch(wtRoot: string, branch: string, key: string, ctx: Extension
 			settle(status, detail);
 			return;
 		}
-		execFile("gh", ["run", "list", "--branch", branch, "--limit", "5", "--json", "status,conclusion,workflowName"], opts, (_e2, out2) => {
+		execFile("gh", ["run", "list", "--branch", branch, "--limit", "5", "--json", "status,conclusion,workflowName,headSha"], opts, (_e2, out2) => {
 			const runs = safeJson(out2 ?? "");
 			if (!Array.isArray(runs)) {
 				settle("unknown");
 				return;
 			}
-			if (!runs.length) {
-				settle("none");
-				return;
-			}
-			const { status, detail } = combineRuns(runs);
+			const { status, detail } = combineRuns(runs, head);
 			settle(status, detail);
 		});
 	});
@@ -377,7 +403,7 @@ function ciSegment(wtRoot: string, branch: string, head: string, ctx: ExtensionC
 	const key = `${wtRoot}|${branch}|${head}`;
 	// Render-time fetch only on a NEW target; periodic refresh is the timer's
 	// job (a TTL here drifts against the timer phase — see pollTick).
-	if (!ciCache || ciCache.key !== key) kickCiFetch(wtRoot, branch, key, ctx);
+	if (!ciCache || ciCache.key !== key) kickCiFetch(wtRoot, branch, head, key, ctx);
 	if (!ciCache || ciCache.key !== key) return t.fg("muted", "CI …");
 	const c = ciCache;
 	if (c.status === "green") return t.fg("success", "CI ✓");
@@ -423,7 +449,7 @@ function pollTick(): void {
 	const key = `${current}|${branch}|${head}`;
 	const ciBackoff =
 		ciCache?.status === "unknown" && ciCache.key === key && Date.now() - ciCache.at < CI_UNKNOWN_BACKOFF_MS;
-	if (!ciBackoff) kickCiFetch(current, branch, key, lastCtx);
+	if (!ciBackoff) kickCiFetch(current, branch, head, key, lastCtx);
 	const prKey = `${current}|${branch}`;
 	const prSkip =
 		(issuePrCache?.key === prKey && Date.now() - issuePrCache.at < PR_POLL_MS) || // fresh enough
