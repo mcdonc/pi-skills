@@ -114,7 +114,7 @@ When the user runs `/skill:workon <ISSUE#> [repo]` (or asks equivalently):
    ```
    The ancestor rule means post-review fix commits do not trigger another
    review (the reviewed base is contained in HEAD) — the footer's
-   `rvw ✓ (stale)` is expected and fine. A genuinely unrelated new head still
+   `rvw ✓ +N` is expected and fine. A genuinely unrelated new head still
    gets reviewed.
 
 7. **Open a PR and attach the review.** Once the rebase is clean, the suite
@@ -129,11 +129,8 @@ When the user runs `/skill:workon <ISSUE#> [repo]` (or asks equivalently):
      [ -f "$d/done" ] && [ -s "$d/review.md" ] && newest="$d"
    done
    if [ -n "$newest" ]; then
-     model=$(grep -oP '^model=\K.*' "$newest/meta" 2>/dev/null)
      {
        echo "## Fresh-eyes review"
-       echo
-       echo "_Automated adversarial review${model:+ by $model}; findings were triaged and addressed before this PR was opened._"
        echo
        cat "$newest/review.md"
      } > /tmp/review-comment.md

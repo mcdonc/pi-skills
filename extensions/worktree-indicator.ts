@@ -16,7 +16,8 @@
  *   rvw ✓ <age>   — a /review (skills/review) run FINISHED for this branch
  *                      (records under ~/.pi/agent/reviews/<repo>/<branch>/);
  *                      age is time since it finished. Warning-colored +
- *                      "(stale)" when HEAD moved since that review. rvw ◌
+ *                      "+N" (commits on HEAD since the reviewed head) when
+ *                      HEAD moved past it. rvw ◌
  *                      = a run is live now; rvw ✗ = attempts exist but
  *                      none ever finished; muted rvw – = never attempted.
  *   CI ✓ / ✗ <name> / ◌ / – — GitHub checks for the branch via gh: PR checks
@@ -187,15 +188,16 @@ function relTime(tsSec: number): string {
 
 type ReviewState =
 	| { status: "running" }
-	| { status: "done"; finishedSec: number; stale: boolean }
+	| { status: "done"; finishedSec: number; stale: boolean; commitsSince: number | null }
 	| { status: "broken" };
 
 /**
  * Review state for this branch, from review.sh's records — based on what has
  * FINISHED, not merely started, and only runs whose recorded head is an
- * ANCESTOR of (or equal to) the current HEAD: a fresh attempt on a reused
- * branch name carries none of the abandoned attempt's commits, so its old
- * review must not count (same rule as workon's review skip-check). Priority:
+ * ancestor of / equal to the current HEAD — or present in the branch reflog,
+ * so amend/rebase rewrites after review fixes still count, while a fresh
+ * attempt on a reused branch name (fresh reflog) does not inherit the
+ * abandoned attempt's review. Priority:
  * a live run → running; else the newest completed run (exit 0) → done (age is
  * time since it finished, stale if HEAD moved past its recorded head); else
  * started-but-never-finished attempts → broken; null = nothing applicable.
@@ -212,11 +214,21 @@ function reviewRecord(wtRoot: string, branch: string, head: string | null): Revi
 	const dirs = entries.filter((n) => /^\d+$/.test(n)).sort(); // asc by start time
 	if (!dirs.length) return null;
 
-	// Does this run apply to the current branch contents? (head is an
-	// ancestor of or equal to the current HEAD; empty/unknown head counts
-	// only when it equals HEAD — records predate the ancestor rule.)
-	const applies = (metaHead: string): boolean =>
-		!!metaHead && (metaHead === head || (!!head && gitOk(wtRoot, "merge-base", "--is-ancestor", metaHead, head)));
+	// Does this run apply to the current branch contents? Yes when its head
+	// is an ancestor of / equal to the current HEAD, OR appears in the
+	// branch's reflog: amend/rebase rewrites (the standard post-review-fix
+	// flow) break ancestry but leave the reviewed head in the reflog, while a
+	// recreated branch (fresh attempt on a reused name) has a fresh reflog
+	// without the abandoned attempt's commits.
+	let reflogHeads: string[] | null = null;
+	const applies = (metaHead: string): boolean => {
+		if (!metaHead) return false;
+		if (head && (metaHead === head || gitOk(wtRoot, "merge-base", "--is-ancestor", metaHead, head))) return true;
+		if (reflogHeads === null) {
+			reflogHeads = (git(wtRoot, "reflog", "show", branch, "--format=%H") ?? "").split("\n").map((l) => l.trim());
+		}
+		return reflogHeads.includes(metaHead);
+	};
 
 	let completed: { finishedSec: number; metaHead: string } | null = null;
 	let running: { pid: number; startedSec: number } | null = null;
@@ -247,11 +259,15 @@ function reviewRecord(wtRoot: string, branch: string, head: string | null): Revi
 		return { status: "running" };
 	}
 	if (completed) {
-		return {
-			status: "done",
-			finishedSec: completed.finishedSec,
-			stale: Boolean(head && completed.metaHead && completed.metaHead !== head),
-		};
+		const stale = Boolean(head && completed.metaHead && completed.metaHead !== head);
+		// Commits on HEAD since the reviewed head (works even when the reviewed
+		// head was amended/rebased away — it counts the HEAD side of the range).
+		let commitsSince: number | null = null;
+		if (stale && head && completed.metaHead) {
+			const n = Number(git(wtRoot, "rev-list", "--count", `${completed.metaHead}..${head}`));
+			commitsSince = Number.isInteger(n) && n >= 0 ? n : null;
+		}
+		return { status: "done", finishedSec: completed.finishedSec, stale, commitsSince };
 	}
 	if (attempted) return { status: "broken" };
 	return null;
@@ -557,7 +573,10 @@ function render(ctx: ExtensionContext): void {
 			const rv = reviewRecord(current, info.branch, head);
 				parts.push(
 				rv?.status === "done"
-				? t.fg(rv.stale ? "warning" : "success", `rvw ✓ ${relTime(rv.finishedSec)}${rv.stale ? " (stale)" : ""}`)
+				? t.fg(
+						rv.stale ? "warning" : "success",
+						`rvw ✓ ${relTime(rv.finishedSec)}${rv.stale && rv.commitsSince !== null && rv.commitsSince > 0 ? ` +${rv.commitsSince}` : ""}`,
+					)
 				: rv?.status === "running"
 					? t.fg("accent", "rvw ◌")
 					: rv?.status === "broken"
