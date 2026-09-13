@@ -91,12 +91,17 @@ When the user runs `/skill:workon <ISSUE#> [repo]` (or asks equivalently):
    ```
    Re-run the full test suite after the rebase to confirm the merge is clean.
 
-6. **Review before the PR — unless one has already been done.** Right after
-   the first push, run the `/review` skill against the branch (the reviewer
-   runs in the background and takes minutes — write the PR body, changelog,
-   and other chores while it runs). Triage its findings, land fixes, and only
-   then open the PR. Skip the review only when one has already FINISHED on
-   this branch's history (a completed review whose recorded head is an
+6. **Open the PR.** Once the rebase is clean and the suite passes, create
+   the PR (`gh pr create` from the worktree) with a proper title and body —
+   before any review runs, so the review can be posted on the PR.
+
+7. **Review the branch — unless one has already been done.** Right after
+   opening the PR, run the `/review` skill against the branch (the reviewer
+   runs in the background and takes minutes — do changelog and other chores
+   while it runs). Triage its findings, land fixes, and push them to the same
+   branch; the open PR updates automatically. Skip the review only when one
+   has already FINISHED on this branch's history (a completed review whose
+   recorded head is an
    ancestor of — or equal to — the current HEAD; review records live under
    `~/.pi/agent/reviews/<owner>/<repo>/<branch>/<ts>/`):
    ```bash
@@ -117,13 +122,12 @@ When the user runs `/skill:workon <ISSUE#> [repo]` (or asks equivalently):
    `rvw ✓ +N` is expected and fine. A genuinely unrelated new head still
    gets reviewed.
 
-7. **Open a PR and attach the review.** Once the rebase is clean, the suite
-   passes, and the review (if one was needed) is addressed, create the PR
-   (`gh pr create` from the worktree). Then attach the reviewer's output as a
+8. **Attach the review to the PR.** When the review has finished and its
+   findings are addressed, post the reviewer's output as a
    PR comment so the review travels with the PR — reusing `$slug`/`$branch`
-   from step 6, pick the newest finished run and post its text:
+   from step 7, pick the newest finished run and post its text:
    ```bash
-   pr=$(gh pr view --json number -q .number)   # from the worktree, after create
+   pr=$(gh pr view --json number -q .number)   # from the worktree
    newest=""
    for d in "$HOME/.pi/agent/reviews/$slug/$branch"/*/; do
      [ -f "$d/done" ] && [ -s "$d/review.md" ] && newest="$d"
@@ -140,7 +144,7 @@ When the user runs `/skill:workon <ISSUE#> [repo]` (or asks equivalently):
    Use `--body-file <path>` exactly as shown — never `--body -` or
    `--body <(...)` (both pass literal junk instead of the content).
 
-8. When finished (PR merged), clean up with the `/skill:merge <PR#>` skill,
+9. When finished (PR merged), clean up with the `/skill:merge <PR#>` skill,
    which removes the worktree and deletes the branch.
 
 ## Notes
@@ -159,9 +163,10 @@ When the user runs `/skill:workon <ISSUE#> [repo]` (or asks equivalently):
   conflicts on PR creation.
 - If the issue is not OPEN, the script aborts. Reopen it first if you really want
   to work on a closed issue.
-- **A PR is never opened on an unreviewed branch.** Workflow step 6 gates
-  `gh pr create` on a completed `/review` run (recorded under
-  `~/.pi/agent/reviews/` — the same records the worktree-indicator footer's
-  `rvw` segment reads).
+- **The PR is opened before the review runs.** Workflow steps 6–8: create the
+  PR, review the branch, then post the review as a PR comment. Review records
+  live under `~/.pi/agent/reviews/` — the same records the worktree-indicator
+  footer's `rvw` segment reads. Post-review fixes are pushed to the same
+  branch and update the open PR.
 - Re-running the skill on the same issue reuses the existing worktree rather
   than clobbering it.
