@@ -91,11 +91,23 @@ When the user runs `/skill:workon <ISSUE#> [repo]` (or asks equivalently):
    ```
    Re-run the full test suite after the rebase to confirm the merge is clean.
 
-6. **Open the PR.** Once the rebase is clean and the suite passes, create
+6. **Run the repo's pre-flight gate before pushing.** If the repo defines
+   a fast gate tool, run it and fix **everything** it names in one editing
+   pass; re-run until green. In msks that is:
+   ```bash
+   devenv --quiet -O dotenv.enable:bool false shell -- msks-preflight
+   ```
+   It reports every commit-gate offender at once (lint, deferred imports,
+   complexity, coverage gaps) and runs the gated suite when sources changed.
+   Without it, the pre-commit hook surfaces offenders one at a time, and the
+   adversarial review (step 8) burns its round on gate noise instead of
+   design.
+
+7. **Open the PR.** Once the rebase is clean and the suite passes, create
    the PR (`gh pr create` from the worktree) with a proper title and body —
    before any review runs, so the review can be posted on the PR.
 
-7. **Review the branch — unless one has already been done.** Right after
+8. **Review the branch — unless one has already been done.** Right after
    opening the PR, run the `/review` skill against the branch (the reviewer
    runs in the background and takes minutes — do changelog and other chores
    while it runs). Triage its findings, land fixes, and push them to the same
@@ -122,10 +134,24 @@ When the user runs `/skill:workon <ISSUE#> [repo]` (or asks equivalently):
    `rvw ✓ +N` is expected and fine. A genuinely unrelated new head still
    gets reviewed.
 
-8. **Attach the review to the PR.** When the review has finished and its
+   **Round budget: one full review, one delta review, then merge.** Apply
+   this mechanically from the review's structured sections — do not ask
+   the user between rounds:
+   - The full review (or a delta) finds **blocking or important** issues →
+     fix, push, then automatically run exactly **one delta review** (see
+     the review skill's *Delta reviews (round 2+)* section).
+   - The delta comes back APPROVE, or with nits/questions only → stop
+     reviewing. Post the review (step 9), wait for CI, and let the user
+     merge. Nits never trigger a round.
+   - The delta **still** finds blocking or important issues → stop anyway
+     and surface them to the user. A third round means the PR needs the
+     user, not another reviewer.
+   - Merging is always the user's call (`/skill:merge`).
+
+9. **Attach the review to the PR.** When the review has finished and its
    findings are addressed, post the reviewer's output as a
    PR comment so the review travels with the PR — reusing `$slug`/`$branch`
-   from step 7, pick the newest finished run and post its text:
+   from step 8, pick the newest finished run and post its text:
    ```bash
    pr=$(gh pr view --json number -q .number)   # from the worktree
    newest=""
@@ -144,7 +170,7 @@ When the user runs `/skill:workon <ISSUE#> [repo]` (or asks equivalently):
    Use `--body-file <path>` exactly as shown — never `--body -` or
    `--body <(...)` (both pass literal junk instead of the content).
 
-9. When finished (PR merged), clean up with the `/skill:merge <PR#>` skill,
+10. When finished (PR merged), clean up with the `/skill:merge <PR#>` skill,
    which removes the worktree and deletes the branch.
 
 ## Notes
@@ -163,7 +189,7 @@ When the user runs `/skill:workon <ISSUE#> [repo]` (or asks equivalently):
   conflicts on PR creation.
 - If the issue is not OPEN, the script aborts. Reopen it first if you really want
   to work on a closed issue.
-- **The PR is opened before the review runs.** Workflow steps 6–8: create the
+- **The PR is opened before the review runs.** Workflow steps 7–9: create the
   PR, review the branch, then post the review as a PR comment. Review records
   live under `~/.pi/agent/reviews/` — the same records the worktree-indicator
   footer's `rvw` segment reads. Post-review fixes are pushed to the same

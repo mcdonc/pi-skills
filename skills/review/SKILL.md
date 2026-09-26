@@ -40,6 +40,8 @@ you can't see because you wrote them.
    (git log, --stat, re-reading files you already read). The template also tells
    the reviewer not to re-run full suites (CI is authoritative); keep that
    instruction unless the PR's whole point is test behavior.
+   For the second and later reviews of the same branch, write a **delta
+   mandate** instead — see the **Delta reviews (round 2+)** section below.
 
 3. **Spawn the reviewer with the script.** Hand it your mandate file:
    ```bash
@@ -54,6 +56,39 @@ you can't see because you wrote them.
 4. **Monitor and surface the result.** Poll the output file (the script prints
    the path + a polling command). When the reviewer finishes, read the review to
    the user and, if asked, triage the findings into fix-now / discuss / dismiss.
+
+## Delta reviews (round 2+)
+
+Round 2+ on the same branch is a **delta review**: scope the mandate to what
+changed since the last review plus verification of its findings. A full
+re-read of an already-reviewed tree wastes the round re-finding what is
+already recorded. When the user says "delta review", "review again",
+"/review <N> again", or "re-review since the last review", they mean this
+section. If no finished review exists for the branch (no baseline to delta
+from), run a full review instead.
+
+Build the mandate as in Workflow steps 1–2, but:
+
+1. Find the baseline — the newest finished review for this branch:
+   ```bash
+   url=$(git config --get remote.origin.url); url=${url%.git}; url=${url#*://}; url=${url#*:}
+   slug="$(basename "$(dirname "$url")")/$(basename "$url")"
+   branch=$(git branch --show-current)
+   newest=$(for d in "$HOME/.pi/agent/reviews/$slug/$branch"/*/; do
+     [ -f "$d/done" ] && echo "$d"
+   done | tail -1)
+   base=$(grep -oP '^head=\K[0-9a-f]+' "$newest/meta")
+   ```
+2. Copy the template and paste the scope block from
+   [`references/delta-review-scope.md`](references/delta-review-scope.md)
+   at the top, filling in `<base>`, the `<base>..HEAD` diff, and the prior
+   run's `review.md`.
+3. Right-size the spawn: `--thinking medium` is usually enough for a delta
+   round; keep `high` for deltas touching auth/security surfaces.
+
+A finished delta review records its head like any other run, so the workon
+skill's ancestor check (post-review fix commits don't re-trigger review)
+keeps working unchanged.
 
 **Overlap, don't serialize.** The reviewer runs in the background by default.
 Spawn it immediately after the first push — not after the PR body, changelog

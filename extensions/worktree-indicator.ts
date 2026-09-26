@@ -34,7 +34,8 @@
  * operates on the worktree via absolute paths. This extension watches bash /
  * read / write / edit tool calls for `.worktrees/<name>` paths and locks onto
  * the most recently touched worktree. It clears when that worktree disappears
- * from disk (e.g. after /merge) or a different worktree is touched.
+ * from disk (e.g. after /merge) or a different worktree is touched twice —
+ * a single read-only peek at another worktree does not steal the lock.
  *
  * Auto-discovered from ~/.pi/agent/extensions/. Reloads on /reload.
  */
@@ -512,14 +513,34 @@ function extractWorktreeRoot(text: string, cwd: string): string | null {
  * needed. Fresh sessions have empty transcripts and show nothing until the
  * agent actually touches a `.worktrees/<name>` path.
  */
+/**
+ * Worktrees seen in recent tool CALLS (tool_result repeats the same input and
+ * would double-count). A worktree must show up twice before it can STEAL the
+ * lock from another one: a single read-only peek (`git -C ../other log`)
+ * must not flip the bar away from the worktree the session is working in.
+ */
+const recentToolCallRoots: string[] = [];
+
+function switchThresholdMet(root: string): boolean {
+	const hits = recentToolCallRoots.filter((r) => r === root).length;
+	return hits >= 2;
+}
+
 function lockFromTranscript(ctx: ExtensionContext): string | null {
 	try {
 		const entries: unknown[] = ctx.sessionManager?.getEntries?.() ?? [];
-		// Newest first, bounded — the most recent worktree reference wins.
+		// Newest first, bounded. Same repetition rule as live tool calls: the
+		// most recent worktree with 2+ references wins (a lone peek doesn't).
+		let last: string | null = null;
+		const counts = new Map<string, number>();
 		for (let i = entries.length - 1; i >= 0 && i >= entries.length - 200; i--) {
 			const root = extractWorktreeRoot(JSON.stringify(entries[i]) ?? "", ctx.cwd);
-			if (root && isLinkedWorktree(root)) return root;
+			if (!root || !isLinkedWorktree(root)) continue;
+			if (!last) last = root;
+			counts.set(root, (counts.get(root) ?? 0) + 1);
+			if (counts.get(root)! >= 2) return root;
 		}
+		return last; // only single mentions — better than nothing for a fresh reload
 	} catch {
 		// Transcript access is best-effort; fall through to no lock.
 	}
@@ -654,13 +675,20 @@ export default function worktreeIndicator(pi: ExtensionAPI): void {
 		toolName: string,
 		input: { command?: unknown; path?: unknown },
 		ctx: ExtensionContext,
+		isResult = false,
 	): void {
 		const blob = blobFromInput(toolName, input);
 		if (!blob) return;
 
 		const root = extractWorktreeRoot(blob, ctx.cwd);
 		if (!root || !isLinkedWorktree(root)) return;
-		if (root !== current) lockOn(root, ctx);
+		if (!isResult) {
+			recentToolCallRoots.push(root);
+			if (recentToolCallRoots.length > 50) recentToolCallRoots.shift();
+		}
+		// tool_result re-checks freshly created worktrees (its tool_call ran
+		// before the worktree existed), but never bypasses the steal threshold.
+		if (root !== current && (current === null || switchThresholdMet(root))) lockOn(root, ctx);
 	}
 
 	// Lock onto the worktree the agent is actually operating in. Watches the
@@ -675,7 +703,7 @@ export default function worktreeIndicator(pi: ExtensionAPI): void {
 	// yet and is skipped by the isLinkedWorktree check. Re-scan the same input
 	// once the tool has finished to catch freshly created worktrees.
 	pi.on("tool_result", async (event, ctx) => {
-		scanToolInput(event.toolName, event.input, ctx);
+		scanToolInput(event.toolName, event.input, ctx, true);
 	});
 
 	pi.on("session_shutdown", async () => {
