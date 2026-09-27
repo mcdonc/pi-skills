@@ -12,3 +12,4 @@
 # pi never writes skill state into this dir (slop cursor lives in
 # ~/.local/state/pi-slop/), but ignore any stray local state just in case
 .slop-state/
+__pycache__/

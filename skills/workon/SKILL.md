@@ -170,7 +170,64 @@ When the user runs `/skill:workon <ISSUE#> [repo]` (or asks equivalently):
    Use `--body-file <path>` exactly as shown — never `--body -` or
    `--body <(...)` (both pass literal junk instead of the content).
 
-10. When finished (PR merged), clean up with the `/skill:merge <PR#>` skill,
+10. **Post the structural artifacts once the review rounds are done.**
+    After the review flow settles — the delta review approves, or the
+    full review finds nothing blocking — and the final fixes are
+    pushed, attach the branch's component-level structure record to
+    the PR: the import-edge delta, the public-API surface diff, and
+    a Mermaid diagram of the touched components plus one hop of
+    neighbors. Prefer a repo-shipped generator
+    (`scripts/structure_artifacts.py` at the repo root) when the repo
+    defines one; otherwise use the portable generator this skill
+    ships (stdlib-only Python, reads both trees through git):
+    ```bash
+    wt=<WORKTREE_PATH>
+    "$HOME/.pi/agent/skills/workon/scripts/structure_artifacts.py" \
+      --base origin/<default-branch> --tree HEAD > /tmp/structure.md
+    cat /tmp/structure.md   # "No component-level structural changes" -> skip posting
+    gh pr comment <PR#> --body-file /tmp/structure.md
+    ```
+    Commit first — the generator reads the committed tree, so
+    uncommitted work is invisible to it. It runs last by design:
+    every review round rewrites the branch, and after the final
+    review the artifacts describe the tree that will actually
+    merge. Use `--body-file <path>` exactly as shown — never
+    `--body -` or `--body <(...)`.
+
+    **Then post the 3D dependency graph as a gist.** The same tree
+    data drives an interactive page: the module-level graph of the
+    head tree rendered with `3d-force-graph`, where edges the branch
+    adds glow green, edges it removes render red, and nodes are
+    colored by component and sized by import count. The generator
+    emits one self-contained HTML file (the library and the graph
+    data are inlined), uploads it as a secret gist, and the PR
+    comment links an in-browser rendering and the gist source:
+    ```bash
+    "$HOME/.pi/agent/skills/workon/scripts/dep_graph_3d.py" \
+      --base origin/<default-branch> --tree HEAD --out /tmp/dep-graph-3d.html
+    gist=$(gh gist create /tmp/dep-graph-3d.html \
+      --desc "<owner/repo>#<PR#> dependency graph (3D)")
+    raw="${gist/gist.github.com/gist.githubusercontent.com}/raw/dep-graph-3d.html"
+    {
+      echo "## 3D dependency graph (self-contained HTML)"
+      echo
+      echo "- [Render in browser](https://htmlpreview.github.io/?$raw)"
+      echo "- [Gist source]($gist)"
+      echo
+      echo "The page is fully self-contained: save it from either link and it opens offline. GitHub serves the raw gist as plain text, so the source link downloads; the render link views."
+    } > /tmp/dep3d-comment.md
+    gh pr comment <PR#> --body-file /tmp/dep3d-comment.md
+    ```
+    The first run of `dep_graph_3d.py` fetches the `3d-force-graph`
+    bundle from a CDN into `~/.cache/pi-skills/` and inlines it from
+    then on; pass `--lib <path>` to point at a specific copy. The
+    render link routes the page through the third-party
+    htmlpreview service, which can read anything the gist URL can —
+    on a private repo, use the source link and open the file
+    locally when that exposure matters. The gist is secret
+    (unlisted): it stays out of search and your public profile.
+
+11. When finished (PR merged), clean up with the `/skill:merge <PR#>` skill,
    which removes the worktree and deletes the branch.
 
 ## Notes

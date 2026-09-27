@@ -86,7 +86,27 @@ When you run `/skill:stackon <PR> <ISSUE> [repo]` (or ask equivalently):
    gh pr create --base <BASE_PR_HEAD> --head <BRANCH> --title "..." --body-file <body>
    ```
 
-6. **When the base PR merges**, the stack collapses: rebase this branch onto
+6. **Review, gate, and post the structural artifacts.** Run the
+   same loop workon defines: the repo's pre-flight gate before the
+   first commit attempt (workon step 6), the fresh-eyes review plus
+   one delta round with the review posted as a PR comment (workon
+   steps 8–9), and — once the review rounds are done — the
+   component-level structure record. Anchor the delta at the parent
+   PR's head, not main: a merge base against main would fold in the
+   base PR's own changes and flood the report.
+   ```bash
+   git fetch origin "refs/pull/<BASE_PR#>/head"
+   "$HOME/.pi/agent/skills/workon/scripts/structure_artifacts.py" \
+     --base FETCH_HEAD --tree HEAD > /tmp/structure.md
+   cat /tmp/structure.md   # "No component-level structural changes" -> skip posting
+   gh pr comment <PR#> --body-file /tmp/structure.md
+   ```
+   Prefer a repo-shipped `scripts/structure_artifacts.py` when the
+   repo defines one, and commit before running — the generator
+   reads git trees. It lives in the workon skill's `scripts/`
+   directory; both skills share it.
+
+7. **When the base PR merges**, the stack collapses: rebase this branch onto
    the default branch and re-target its PR at main:
    ```bash
    git fetch origin <default-branch>
