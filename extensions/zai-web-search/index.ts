@@ -4,6 +4,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { Text } from "@earendil-works/pi-tui";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 
 // Z.AI Web Search remote MCP server.
 // Docs: https://docs.z.ai/devpack/mcp/search-mcp-server
@@ -18,21 +19,36 @@ export default function (pi: ExtensionAPI) {
   let clientPromise: Promise<Client> | null = null;
   let discoveredTools: DiscoveredTool[] | null = null;
 
-  // Z.AI auth token lives in the agenix-decrypted file created by the NixOS
-  // config (age.secrets."zai-authtoken" -> /run/agenix/zai-authtoken).
-  // Allow ZAI_API_KEY to override with a literal key or alternate file path.
-  const AUTHTOKEN_FILE = process.env.ZAI_API_KEY ?? "/run/agenix/zai-authtoken";
+  // Z.AI auth token. Resolution order:
+  //   1. ZAI_API_KEY env var: a path to a token file, or a literal key
+  //      (a value containing "/" is treated as a path).
+  //   2. Well-known secret locations: the agenix-decrypted file on NixOS
+  //      (age.secrets."zai-authtoken" -> /run/agenix/zai-authtoken) and the
+  //      pi agent dir on macOS / other hosts (~/.pi/agent/zai-authtoken).
+  // Never send a missing file's path as the token: z.ai replies with a
+  // non-JSON-RPC error envelope (HTTP 200, {code,msg,success}) that makes the
+  // MCP SDK throw an opaque zod validation error.
+  const AUTHTOKEN_CANDIDATES = [
+    "/run/agenix/zai-authtoken",
+    `${homedir()}/.pi/agent/zai-authtoken`,
+  ];
   function resolveApiKey(): string {
-    const raw = AUTHTOKEN_FILE.trim();
-    if (existsSync(raw)) {
-      return readFileSync(raw, "utf8").trim();
-    }
-    if (!raw) {
+    const raw = (process.env.ZAI_API_KEY ?? "").trim();
+    if (raw) {
+      if (existsSync(raw)) return readFileSync(raw, "utf8").trim();
+      if (!raw.includes("/")) return raw; // literal key
       throw new Error(
-        `Z.AI auth token file not found at ${AUTHTOKEN_FILE}. Ensure the agenix secret "zai-authtoken" is declared for this host. Get a key from https://docs.z.ai/devpack/overview`
+        `ZAI_API_KEY points to a file that does not exist: ${raw}`
       );
     }
-    return raw;
+    for (const path of AUTHTOKEN_CANDIDATES) {
+      if (existsSync(path)) return readFileSync(path, "utf8").trim();
+    }
+    throw new Error(
+      `Z.AI auth token not found. Set ZAI_API_KEY to a key or file path, or place the token at ` +
+        AUTHTOKEN_CANDIDATES.join(" or ") +
+        `. Get a key from https://docs.z.ai/devpack/overview`
+    );
   }
 
   async function getClient(): Promise<Client> {
