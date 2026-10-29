@@ -240,7 +240,15 @@ launch() {
     printf 'printf "finished=%%s\\nexit=%%s\\n" "$(date +%%s)" "$rc" > %q\n' "$RUN_DIR/done"
   } > "$LAUNCHER"
   chmod +x "$LAUNCHER"
-  setsid bash "$LAUNCHER" </dev/null >/dev/null 2>&1 &
+  # setsid is a util-linux tool macOS does not ship; nohup covers the
+  # same detach need (parent-exit immunity) when it is absent. Without
+  # this fallback the spawn dies silently on macOS — the launcher never
+  # runs, but the pre-created empty out/err files read as a live run.
+  if command -v setsid >/dev/null 2>&1; then
+    setsid bash "$LAUNCHER" </dev/null >/dev/null 2>&1 &
+  else
+    nohup bash "$LAUNCHER" </dev/null >/dev/null 2>&1 &
+  fi
   disown 2>/dev/null || true
   # Give setsid a moment to spawn + write the pidfile.
   for _ in 1 2 3 4 5 6 7 8 9 10; do
