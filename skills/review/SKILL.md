@@ -46,8 +46,11 @@ you can't see because you wrote them.
 3. **Spawn the reviewer with the script.** Hand it your mandate file:
    ```bash
    scripts/review.sh --pr <NUM|branch|url> --prompt <mandate.md>
-   # optionally pick a strong reasoning model:
-   scripts/review.sh --pr 1390 --prompt /tmp/review.md --model z.ai/glm-5.3 --thinking high
+   # --model is optional: the reviewer defaults to the active session's
+   # model (same provider, same model as the agent spawning it):
+   scripts/review.sh --pr 1390 --prompt /tmp/review.md --thinking high
+   # override only to pick a different one:
+   scripts/review.sh --pr 1390 --prompt /tmp/review.md --model z.ai-3/glm-5.3 --thinking high
    ```
    The script handles the tricky parts — detaching the subprocess, giving it
    `--approve` so tools actually run, capturing the real child PID, and telling
@@ -124,11 +127,14 @@ By the time the PR is presentable, the review is usually done. If you run
 
 - The reviewer runs **in the same repo/worktree** (inherits cwd) so it sees the
   real code and can run the real tests.
-- Default model is pi's configured default, `--thinking high`. **Right-size
-  both.** `high` + a strong reasoning model (`o3-pro`, `opus`, `gemini-pro`,
-  `z.ai/glm-5.3`) is for auth/security surfaces, migrations, large refactors.
-  For a typical scoped workon PR, `--thinking medium` (or a faster model)
-  loses little and finishes much sooner. Pass `--model <provider/id>`.
+- Default model is the invoking session's active model (inherited from the
+  `PI_PROVIDER`/`PI_MODEL` env vars pi exports to its subprocesses); outside
+  a pi session it's pi's configured default. `--thinking` defaults to `high`.
+  **Right-size both.** `high` + a strong reasoning model (`o3-pro`, `opus`,
+  `gemini-pro`, `z.ai-3/glm-5.3`) is for auth/security surfaces, migrations,
+  large refactors. For a typical scoped workon PR, `--thinking medium` (or a
+  faster model) loses little and finishes much sooner. Pass `--model
+  <provider/id>` to override the inherited default.
 - Output is plain markdown; feed it back to the user verbatim or summarize it.
 - Every run is recorded under `~/.pi/agent/reviews/<repo>/<branch>/<ts>/`
   (`meta`, the mandate, `review.md`, `pid`, `done`). Past reviews stay

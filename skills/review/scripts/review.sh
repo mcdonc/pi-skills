@@ -15,9 +15,12 @@
 #                   - "local"                         -> reviews main...HEAD diff
 #   --prompt      Path to the review mandate (markdown). Required. The agent is
 #                 expected to have tailored references/review-prompt.md for the PR.
-#   --model       pi model as provider/id (e.g. z.ai/glm-5.3, openai/o3-pro).
-#                 Default: pi's configured default model (from
-#                 ~/.pi/agent/settings.json) — the model in use by pi.
+#   --model       pi model as provider/id (e.g. z.ai-3/glm-5.3, openai/o3-pro).
+#                 Default: the invoking session's active model — pi exports
+#                 PI_PROVIDER/PI_MODEL to its subprocesses, so a review spawned
+#                 from an agent session runs on the same provider+model as that
+#                 session. Outside a pi session, falls back to pi's configured
+#                 default. An explicit --model always overrides.
 #   --thinking    off|minimal|low|medium|high|xhigh (default: high).
 #   --blind       Pass --no-context-files --no-skills so the reviewer has NO
 #                 project context — a truly blind read of the diff alone. By
@@ -68,6 +71,7 @@ repo_slug() {
 PR=""
 PROMPT=""
 MODEL=""
+MODEL_SOURCE="explicit"
 THINKING="high"
 BLIND=0
 WORKTREE=""
@@ -96,6 +100,28 @@ done
 [ -n "$PR" ]     || { echo "review.sh: --pr is required (number, URL, branch, or 'local')" >&2; exit 2; }
 [ -n "$PROMPT" ] || { echo "review.sh: --prompt <mandate.md> is required" >&2; exit 2; }
 [ -f "$PROMPT" ] || { echo "review.sh: prompt file not found: $PROMPT" >&2; exit 2; }
+
+# Default the reviewer's model to the invoking session's active model. pi
+# exports PI_PROVIDER and PI_MODEL to the bash subprocesses it spawns, so the
+# reviewer runs on the same provider+model as the agent that spawned it (a
+# mid-session /model switch is picked up too), instead of pi's configured
+# default. An explicit --model always overrides; outside a pi session (no
+# PI_MODEL in the environment) the spawned pi uses its configured default.
+if [ -z "$MODEL" ]; then
+  if [ -n "${PI_MODEL:-}" ]; then
+    case "$PI_MODEL" in
+      */*) MODEL="$PI_MODEL" ;;
+      *)   if [ -n "${PI_PROVIDER:-}" ]; then
+             MODEL="$PI_PROVIDER/$PI_MODEL"
+           else
+             MODEL="$PI_MODEL"
+           fi ;;
+    esac
+    MODEL_SOURCE="inherited from session (PI_PROVIDER/PI_MODEL)"
+  else
+    MODEL_SOURCE="pi configured default"
+  fi
+fi
 
 command -v "$PI_BIN" >/dev/null 2>&1 || {
   echo "review.sh: pi binary not found ('$PI_BIN'). Install pi or set --pi / \$PI_BIN." >&2
@@ -166,6 +192,7 @@ mkdir -p "$RUN_DIR"
   echo "pr=$PR"
   echo "subject=$SUBJECT"
   echo "model=$MODEL"
+  echo "model_source=$MODEL_SOURCE"
   echo "thinking=$THINKING"
   echo "head=$HEAD_SHA"
   echo "started=$STARTED"
@@ -186,7 +213,11 @@ echo "out=$OUT" >> "$RUN_DIR/meta"
 #   --approve      REQUIRED for -p mode to use tools (no prompt possible)
 #   --thinking     high for deep adversarial reasoning over a diff
 ARGS=(-p --no-session --approve --thinking "$THINKING" --name "review: $SUBJECT")
-[ -n "$MODEL" ] && ARGS+=(--provider "${MODEL%%/*}" --model "${MODEL#*/}")
+# --provider only makes sense when MODEL carries a provider/ prefix.
+case "$MODEL" in
+  */*) ARGS+=(--provider "${MODEL%%/*}" --model "${MODEL#*/}") ;;
+  *)   ARGS+=(--model "$MODEL") ;;
+esac
 [ "$BLIND" -eq 1 ] && ARGS+=(--no-context-files --no-skills)
 
 # Prepend the review framing to the mandate. Keep it short — the mandate file
@@ -260,7 +291,7 @@ launch() {
 
   echo "Spawned reviewer for: $SUBJECT"
   echo "  cwd:      $WORKTREE"
-  echo "  model:    ${MODEL:-pi default} (thinking=$THINKING, blind=$([ "$BLIND" -eq 1 ] && echo yes || echo no))"
+  echo "  model:    ${MODEL:-pi configured default} [$MODEL_SOURCE] (thinking=$THINKING, blind=$([ "$BLIND" -eq 1 ] && echo yes || echo no))"
   echo "  output:   $OUT"
   echo "  record:   $RUN_DIR"
   echo "  stderr:   $ERR"
