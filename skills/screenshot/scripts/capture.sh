@@ -63,6 +63,23 @@ fi
 TS="$(date +%Y%m%d-%H%M%S)"
 OUT="${1:-$DIR/screenshot-$TS.png}"
 
+# Wayland: X11 grabbers (import, x11grab) capture nothing — the XWayland root
+# window holds no compositor content. Use spectacle (KDE) when available, then
+# crop to the requested geometry with magick. grim is wlroots-only, not KWin.
+if [ -n "${WAYLAND_DISPLAY:-}" ] && command -v spectacle >/dev/null 2>&1; then
+  TMP="$(mktemp --suffix=.png)"
+  spectacle -b -n -f -o "$TMP" || { rm -f "$TMP"; echo "spectacle capture failed" >&2; exit 1; }
+  if [ -n "$GEOMETRY" ]; then
+    GEO_ONLY="${GEOMETRY#-crop }"
+    magick "$TMP" -crop "$GEO_ONLY" +repage "$OUT" || { cp "$TMP" "$OUT"; }
+  else
+    mv "$TMP" "$OUT"
+  fi
+  rm -f "$TMP"
+  echo "$OUT"
+  exit 0
+fi
+
 if [ -n "$GEOMETRY" ]; then
   "$BIN" -window root $GEOMETRY "$OUT"
 else
