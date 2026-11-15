@@ -21,9 +21,15 @@ you can't see because you wrote them.
    ```bash
    gh pr view <NUM> --json title,body,baseRefName,headRefName,files   # for a PR
    gh pr diff <NUM> | head -200                                       # skim the diff
-   git log --oneline main..HEAD                                       # local branch
-   git diff main...HEAD --stat                                        # scope
+   git log --oneline <base>..HEAD                                     # local branch
+   git diff <base>...HEAD --stat                                      # scope
    ```
+   `<base>` is the branch the work sits on: the PR's `baseRefName` when
+   reviewing a PR, and for a local branch the default branch — unless the
+   branch was created off an integration branch (`/workon --base X`), in
+   which case diff against `origin/X`, not the default branch. Diffing an
+   integration-branch worktree against the default branch reviews the whole
+   integration effort, not the change under review.
    Read the changed files directly (the big ones, the security-sensitive ones).
    The goal is to know *what the change does* and *where its risk concentrates*
    so you can write PR-specific scrutiny points.

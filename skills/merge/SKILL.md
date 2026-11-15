@@ -10,10 +10,15 @@ remote artifacts in one shot.
 
 ## Command
 
-- `merge.sh [--dry-run] <PR#> [REPO]` — merge + cleanup.
+- `merge.sh [--dry-run] [--expect-base <BRANCH>] <PR#> [REPO]` — merge + cleanup.
 
 Arguments:
 - `--dry-run` — optional; print what would happen without merging or deleting anything.
+- `--expect-base <BRANCH>` — optional; abort unless the PR's base branch is
+  `<BRANCH>`. Use it for integration-branch workflows (`/workon --base X`):
+  the script merges with `--admin`, which bypasses branch protection, so this
+  guard is what stops a PR accidentally opened against the default branch
+  from being merged into it.
 - `<PR#>` — required PR number.
 - `[REPO]` — optional repo as `owner/name`. Defaults to the current directory's
   repo (detected via gh).
@@ -54,11 +59,15 @@ When the user runs `/skill:merge <PR#> [repo]` (or asks equivalently):
    ```bash
    <skill_dir>/scripts/merge.sh <PR#> [REPO]
    ```
-2. Report the script's summary output to the user (merge status, worktree removals,
-   branch deletions).
+   For a PR that belongs to an integration-branch effort (`/workon --base X`),
+   pass `--expect-base X` so the merge refuses a wrong-base PR.
+2. Report the script's summary output to the user (merge status, base branch,
+   worktree removals, branch deletions).
 
 ## Notes
 
+- The merge lands the PR into its **base branch**; the summary line prints it
+  (`base='...'`). Check it matches the intended target before celebrating.
 - `--admin` bypasses required reviews, status checks, and branch protection. Only
   use for PRs you intend to force-merge.
 - Fork PRs: remote branch deletion is skipped (the branch is on the contributor's

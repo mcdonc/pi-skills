@@ -188,6 +188,7 @@ if [ -n "$EXISTING_PATH" ]; then
   echo
   echo "WORKTREE_PATH=$EXISTING_PATH"
   echo "BRANCH=$BRANCH"
+  echo "BASE=$(git -C "$EXISTING_PATH" config --get workon.base 2>/dev/null || echo "")"
   echo "ISSUE_URL=$URL"
   echo
   echo "=== Issue body ==="
@@ -236,6 +237,12 @@ else
   }
 fi
 
+# --- Record the base branch in the worktree ---
+# Later steps (rebase target, PR --base, structure artifacts) must use the
+# same base the worktree was created from; git config in the worktree keeps
+# it across sessions (read with: git config --get workon.base).
+git -C "$WORKTREE_DIR" config workon.base "$BASE_BRANCH"
+
 echo
 echo "=== Summary ==="
 echo "Issue #$NUM: $TITLE"
@@ -245,6 +252,7 @@ echo "  worktree=$WORKTREE_DIR"
 echo
 echo "WORKTREE_PATH=$WORKTREE_DIR"
 echo "BRANCH=$BRANCH"
+echo "BASE=$BASE_BRANCH"
 echo "ISSUE_URL=$URL"
 echo
 echo "=== Issue body ==="

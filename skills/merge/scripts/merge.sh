@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 # merge.sh — merge a PR with --admin (bypassing merge protection) and clean up.
 #
-# Usage: merge.sh [--dry-run] <PR#> [REPO]
-#   --dry-run   Print what would happen; do not merge or delete anything.
-#   PR#         required PR number
-#   REPO        optional repo (owner/name); defaults to the current dir's repo
+# Usage: merge.sh [--dry-run] [--expect-base <BRANCH>] <PR#> [REPO]
+#   --dry-run      Print what would happen; do not merge or delete anything.
+#   --expect-base  Safety guard: abort unless the PR's base branch is <BRANCH>.
+#                  Use for integration-branch workflows (workon --base X) so a
+#                  PR accidentally opened against the default branch cannot be
+#                  --admin merged into it by this script.
+#   PR#            required PR number
+#   REPO           optional repo (owner/name); defaults to the current dir's repo
 #
 # Env:
 #   MERGE_METHOD   squash|merge|rebase  (default: squash)
@@ -42,7 +46,13 @@ if [ "${1:-}" = "--dry-run" ]; then
   shift
 fi
 
-PR="${1:?usage: merge.sh [--dry-run] <PR#> [REPO]}"
+EXPECT_BASE=""
+if [ "${1:-}" = "--expect-base" ] && [ -n "${2:-}" ]; then
+  EXPECT_BASE="$2"
+  shift 2
+fi
+
+PR="${1:?usage: merge.sh [--dry-run] [--expect-base <BRANCH>] <PR#> [REPO]}"
 REPO="${2:-}"
 METHOD="${MERGE_METHOD:-squash}"
 
@@ -67,7 +77,7 @@ if [ -n "$REPO" ]; then GH=(gh --repo "$REPO"); else GH=(gh); fi
 # --- Fetch PR info ---
 # Note: `baseRepository` is NOT a valid `gh pr view --json` field, so the base
 # repo is resolved separately via `gh repo view` (or taken from the REPO arg).
-PRINFO="$("${GH[@]}" pr view "$PR" --json number,state,headRefName,headRepository 2>/dev/null)"
+PRINFO="$("${GH[@]}" pr view "$PR" --json number,state,headRefName,baseRefName,headRepository 2>/dev/null)"
 if [ -z "$PRINFO" ]; then
   echo "merge.sh: could not fetch PR #$PR (wrong number? not in a repo? gh auth?)" >&2
   exit 1
@@ -80,20 +90,31 @@ else
   BASE_REPO="$("${GH[@]}" repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)"
 fi
 
-read -r BRANCH HEAD_REPO STATE <<EOF
+read -r BRANCH BASE_REF HEAD_REPO STATE <<EOF
 $(printf '%s' "$PRINFO" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 hr = (d.get("headRepository") or {}).get("nameWithOwner","")
-print(d.get("headRefName",""), hr, d.get("state",""))
+print(d.get("headRefName",""), d.get("baseRefName",""), hr, d.get("state",""))
 ')
 EOF
 
 IS_FORK=0
 [ -n "$HEAD_REPO" ] && [ -n "$BASE_REPO" ] && [ "$HEAD_REPO" != "$BASE_REPO" ] && IS_FORK=1
 
-echo "PR #$PR  branch='$BRANCH'  state=$STATE  $([ "$IS_FORK" = 1 ] && echo "[fork: $HEAD_REPO -> $BASE_REPO]" || echo "[same-repo: $BASE_REPO]")"
+echo "PR #$PR  branch='$BRANCH'  base='$BASE_REF'  state=$STATE  $([ "$IS_FORK" = 1 ] && echo "[fork: $HEAD_REPO -> $BASE_REPO]" || echo "[same-repo: $BASE_REPO]")"
 [ "$DRY_RUN" = 1 ] && echo "(dry-run: no changes will be made)"
+
+# --- Base-branch guard (--expect-base) ---
+# The merge lands the PR into its base branch. When the caller names the
+# expected base, refuse anything else — --admin bypasses branch protection,
+# so this guard is the one thing standing between a wrong-base PR and the
+# default branch.
+if [ -n "$EXPECT_BASE" ] && [ "$BASE_REF" != "$EXPECT_BASE" ]; then
+  echo "merge.sh: PR #$PR base branch is '$BASE_REF', expected '$EXPECT_BASE'." >&2
+  echo "merge.sh: refusing to merge — a PR with the wrong base would land in the wrong branch." >&2
+  exit 1
+fi
 
 # --- Default branch (to switch off the PR branch if we're on it) ---
 DEFAULT_BRANCH="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null \

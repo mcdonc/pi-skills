@@ -63,10 +63,17 @@ When the user runs `/skill:workon <ISSUE#> [repo]` (or asks equivalently):
    The skill directory is the one containing this `SKILL.md` file, e.g.
    `~/.pi/agent/skills/workon`.
 
-2. From the script's output, capture the three machine-readable lines:
+2. From the script's output, capture the four machine-readable lines:
    - `WORKTREE_PATH=<path>` — where to work.
    - `BRANCH=<branch>` — the branch checked out there.
+   - `BASE=<branch>` — the base branch the worktree was created from (the
+     repo's default branch, or the `--base` value). Empty on a reused
+     worktree that predates this field; recover it with
+     `git -C <WORKTREE_PATH> config --get workon.base`.
    - `ISSUE_URL=<url>` — the issue permalink.
+
+   The script also records the base as `workon.base` git config inside the
+   worktree, so later sessions recover it without the original output.
 
 3. **Switch context to the worktree**: run all subsequent implementation
    commands (edits, builds, tests, git commits) inside `WORKTREE_PATH`. Use
@@ -77,18 +84,22 @@ When the user runs `/skill:workon <ISSUE#> [repo]` (or asks equivalently):
    steps, make code changes, run tests/linters, and commit incrementally on the
    new branch.
 
-5. **Rebase onto the latest default branch before pushing.** Main may have
-   moved since the worktree was created (other PRs merged — often via squash,
-   which rewrites the base SHA with no ancestry link to the branch). A stale
-   base shows up as spurious "conflicts" on PR creation even when there's no
-   real divergence. Before the first push, and again whenever the PR sits
-   open while other PRs land:
+5. **Rebase onto the latest base branch before pushing.** The base branch
+   (`BASE` from step 2 — the default branch, or the `--base` integration
+   branch) may have moved since the worktree was created (other PRs merged —
+   often via squash, which rewrites the base SHA with no ancestry link to the
+   branch). A stale base shows up as spurious "conflicts" on PR creation even
+   when there's no real divergence. Before the first push, and again whenever
+   the PR sits open while other PRs land:
    ```bash
-   git fetch origin <default-branch>
-   git rebase origin/<default-branch>
+   base=$(git config --get workon.base)   # inside the worktree
+   git fetch origin "$base"
+   git rebase "origin/$base"
    # resolve any conflicts, then:
    git push -u origin HEAD --force-with-lease
    ```
+   **Never rebase an integration-branch worktree onto the default branch** —
+   rebase against the branch the worktree was based on (`workon.base`).
    Re-run the full test suite after the rebase to confirm the merge is clean.
 
 6. **Run the repo's pre-flight gate before pushing.** If the repo defines
@@ -103,9 +114,15 @@ When the user runs `/skill:workon <ISSUE#> [repo]` (or asks equivalently):
    adversarial review (step 8) burns its round on gate noise instead of
    design.
 
-7. **Open the PR.** Once the rebase is clean and the suite passes, create
-   the PR (`gh pr create` from the worktree) with a proper title and body —
-   before any review runs, so the review can be posted on the PR.
+7. **Open the PR — with the matching base.** Once the rebase is clean and
+   the suite passes, create the PR (`gh pr create` from the worktree) with a
+   proper title and body — before any review runs, so the review can be
+   posted on the PR. **Pass `--base <BASE>` whenever the worktree was
+   created with `--base`**: `gh pr create` defaults the base to the repo's
+   default branch, and a PR for integration-branch work opened without
+   `--base` silently targets the default branch instead of the integration
+   branch. A PR aimed at the wrong base squashes straight into the default
+   branch at merge time.
 
 8. **Review the branch — unless one has already been done.** Right after
    opening the PR, run the `/review` skill against the branch (the reviewer
@@ -182,8 +199,9 @@ When the user runs `/skill:workon <ISSUE#> [repo]` (or asks equivalently):
     ships (stdlib-only Python, reads both trees through git):
     ```bash
     wt=<WORKTREE_PATH>
+    base=$(git -C "$wt" config --get workon.base)   # the PR's base branch
     "$HOME/.pi/agent/skills/workon/scripts/structure_artifacts.py" \
-      --base origin/<default-branch> --tree HEAD > /tmp/structure.md
+      --base "origin/$base" --tree HEAD > /tmp/structure.md
     cat /tmp/structure.md   # "No component-level structural changes" -> skip posting
     gh pr comment <PR#> --body-file /tmp/structure.md
     ```
@@ -203,8 +221,9 @@ When the user runs `/skill:workon <ISSUE#> [repo]` (or asks equivalently):
     data are inlined), uploads it as a secret gist, and the PR
     comment links an in-browser rendering and the gist source:
     ```bash
+    base=$(git -C "$wt" config --get workon.base)   # the PR's base branch
     "$HOME/.pi/agent/skills/workon/scripts/dep_graph_3d.py" \
-      --base origin/<default-branch> --tree HEAD --out /tmp/dep-graph-3d.html
+      --base "origin/$base" --tree HEAD --out /tmp/dep-graph-3d.html
     gist=$(gh gist create /tmp/dep-graph-3d.html \
       --desc "<owner/repo>#<PR#> dependency graph (3D)")
     raw="${gist/gist.github.com/gist.githubusercontent.com}/raw/dep-graph-3d.html"
