@@ -2,7 +2,7 @@
 
 Personal **agent skills** (and pi **extensions**) for [pi](https://github.com/earendil-works/pi-coding-agent) (and any harness that implements the [Agent Skills](https://agentskills.io/specification) standard). These are general-purpose, `gh`-based, repo-agnostic tooling — they apply to any GitHub project, not just one.
 
-This repo is **private** and personal; it's the version-controlled backup + shareable home for skills and extensions that otherwise live only on one machine.
+This repo is personal; it's the version-controlled backup + shareable home for skills and extensions that otherwise live only on one machine.
 
 Layout:
 
