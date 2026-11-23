@@ -170,8 +170,7 @@ if [ -n "$EXPECT_BASE" ] && [ "$BASE_REF" != "$EXPECT_BASE" ]; then
 fi
 
 # --- Stacked children: open PRs whose base branch is this PR's head branch ---
-# Detected (and their head tips recorded) BEFORE anything happens. Children of
-# a fork parent can still be retargeted (the base branch lives in this repo).
+# Detected (and their head tips recorded) BEFORE anything happens.
 declare -a CHILD_NUMS=()
 declare -A CHILD_HEAD=() CHILD_REPO=() CHILD_OK=()
 if [ "$IS_FORK" = 1 ]; then
@@ -324,7 +323,7 @@ manual_rebase() {
   git worktree add --detach "\$wt/wt" 'refs/remotes/origin/$head'
   git -C "\$wt/wt" rebase --onto 'refs/remotes/origin/$BASE_REF' '$tip'
   git -C "\$wt/wt" push --force-with-lease="refs/heads/$head" origin 'HEAD:refs/heads/$head'
-  rm -rf "\$wt"
+  git worktree remove --force "\$wt/wt" && rm -rf "\$wt"
   # then wait for mergeability before merging #$c:
   ${GH[*]} pr view $c --json mergeable,mergeStateStatus
 EOF
