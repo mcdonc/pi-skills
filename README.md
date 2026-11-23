@@ -49,7 +49,7 @@ vision-capable model configured.)
 |---|---|---|
 | `skills/issue/` | `/issue <desc>` | Open a GitHub issue from a natural-language description (summarizes into title + body, files in the current repo or one named in the description). |
 | `skills/address/` | `/address <PR#>` | Respond to PR review comments: detects unresolved threads, makes fixes in a worktree, pushes, posts replies, resolves threads. Re-runnable. |
-| `skills/merge/` | `/merge <PR#>` | Merge a PR with `--admin` (bypasses merge protection), then cleans up the worktree and local/remote branches. |
+| `skills/merge/` | `/merge <PR#>` | Merge a PR with `--admin` (bypasses merge protection), then clean up the worktree and local/remote branches. Stacked-PR safe: retargets open child PRs to the merged PR's base before deleting the branch, replays each child's own commits after a squash, and prints exact manual steps when it can't. |
 | `skills/workon/` | `/workon <ISSUE#>` | Start work on an issue: creates a fresh git worktree off the default branch and prints the issue body. |
 | `skills/screenshot/` | `/screenshot` | Capture the left monitor and interpret it with a vision-capable model. |
 
