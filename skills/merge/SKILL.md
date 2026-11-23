@@ -105,6 +105,15 @@ When the user runs `/skill:merge <PR#> [repo]` (or asks equivalently):
 
 - The merge lands the PR into its **base branch**; the summary line prints it
   (`base='...'`). Check it matches the intended target before celebrating.
+- The script refuses to run when the checkout's `origin` is not the PR's base
+  repo — every git write (branch deletions, the child rebase's fetch and
+  force-push) targets `origin`, so a checkout of a different repo must never
+  be used as the working copy.
+- Child detection **fails closed**: if `gh pr list` (or its JSON filter)
+  fails, the run aborts with nothing merged or deleted — "children unknown"
+  is never treated as "no children". Fork-parent PRs skip detection entirely:
+  a PR's base branch always lives in the base repo, so name matches for a
+  fork parent are base-repo siblings, not stack children.
 - `--admin` bypasses required reviews, status checks, and branch protection —
   but **not merge conflicts**; a `CONFLICTING` PR cannot merge at all, which
   is why the child rebase exists.

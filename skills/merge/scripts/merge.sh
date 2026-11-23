@@ -81,7 +81,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-PR="${1:?usage: merge.sh [--dry-run] [--no-rebase] [--expect-base <BRANCH>] <PR#> [REPO]}"
+if [ $# -lt 1 ]; then
+  echo "usage: merge.sh [--dry-run] [--no-rebase] [--expect-base <BRANCH>] <PR#> [REPO]" >&2
+  exit 2
+fi
+PR="$1"
 REPO="${2:-}"
 METHOD="${MERGE_METHOD:-squash}"
 
@@ -137,6 +141,23 @@ IS_FORK=0
 echo "PR #$PR  branch='$BRANCH'  base='$BASE_REF'  state=$STATE  $([ "$IS_FORK" = 1 ] && echo "[fork: $HEAD_REPO -> $BASE_REPO]" || echo "[same-repo: $BASE_REPO]")"
 [ "$DRY_RUN" = 1 ] && echo "(dry-run: no changes will be made)"
 
+# --- Origin guard (I2) ---
+# Every git write below (worktree removal, local branch -D, remote branch
+# delete, and the child rebase's fetch/force-push) targets `origin`, so a
+# checkout of a different repo would be mutated or queried by branch name
+# alone. Refuse to run unless origin IS the PR's base repo.
+ORIGIN_SLUG="$(git remote get-url origin 2>/dev/null | python3 -c '
+import sys, re
+u = sys.stdin.read().strip()
+m = re.search(r"[:/]([^/:]+/[^/]+?)(?:\.git)?$", u)
+print((m.group(1) if m else "").lower())
+')"
+if [ -z "$ORIGIN_SLUG" ] || [ "$ORIGIN_SLUG" != "${BASE_REPO,,}" ]; then
+  echo "merge.sh: this checkout's origin ('$ORIGIN_SLUG') is not the PR's repo ('$BASE_REPO')." >&2
+  echo "  All git cleanup/rebase steps target origin — run from a checkout of $BASE_REPO." >&2
+  exit 1
+fi
+
 # --- Base-branch guard (--expect-base) ---
 # The merge lands the PR into its base branch. When the caller names the
 # expected base, refuse anything else — --admin bypasses branch protection,
@@ -153,7 +174,39 @@ fi
 # a fork parent can still be retargeted (the base branch lives in this repo).
 declare -a CHILD_NUMS=()
 declare -A CHILD_HEAD=() CHILD_REPO=() CHILD_OK=()
-if [ "$BRANCH" != "$BASE_REF" ]; then
+if [ "$IS_FORK" = 1 ]; then
+  # A PR's base branch always lives in the base repo, so for a fork parent a
+  # baseRefName == headRefName match is a same-named branch of the BASE repo
+  # (a sibling PR), not a stack child. Retargeting it would move an unrelated
+  # PR, so detection is skipped for fork parents.
+  echo "PR is from a fork — stacked-child detection skipped (name matches would be base-repo siblings, not stack children)."
+elif [ "$BRANCH" != "$BASE_REF" ]; then
+  # Fail closed (B1): if the listing or the JSON filter fails, stacked-child
+  # status is UNKNOWN, not "none" — deleting the merged branch with
+  # undetected children would flip them onto the default branch or close
+  # them, which is exactly what this script exists to prevent.
+  CHILD_RAW="$("${GH[@]}" pr list --state open --limit 1000 --json number,baseRefName 2>/dev/null)"
+  if [ -z "$CHILD_RAW" ]; then
+    echo "merge.sh: could not list open PRs (gh pr list failed) — stacked-child status unknown." >&2
+    echo "  Refusing to proceed. Nothing was merged or deleted; retry when gh works." >&2
+    exit 1
+  fi
+  CHILD_NUMS_STR="$(printf '%s' "$CHILD_RAW" | BRANCH="$BRANCH" python3 -c '
+import json, os, sys
+want = os.environ.get("BRANCH", "")
+try:
+    prs = json.load(sys.stdin)
+except Exception as e:
+    sys.stderr.write("bad JSON from gh pr list: %s\n" % e)
+    sys.exit(1)
+for pr in prs:
+    if pr.get("baseRefName") == want:
+        print(pr.get("number", ""))
+' 2>/dev/null)" || {
+    echo "merge.sh: failed to parse gh pr list output — stacked-child status unknown." >&2
+    echo "  Refusing to proceed. Nothing was merged or deleted." >&2
+    exit 1
+  }
   while IFS= read -r cnum; do
     [ -n "$cnum" ] || continue
     CHILD_NUMS+=("$cnum")
@@ -166,14 +219,7 @@ print((d.get("headRefName") or "") + "\t" + hr)
     CHILD_HEAD[$cnum]="$(printf '%s' "$cline" | cut -f1)"
     CHILD_REPO[$cnum]="$(printf '%s' "$cline" | cut -f2)"
     CHILD_OK[$cnum]=0
-  done < <("${GH[@]}" pr list --state open --limit 200 --json number,baseRefName \
-    | BRANCH="$BRANCH" python3 -c '
-import json, os, sys
-want = os.environ.get("BRANCH", "")
-for pr in json.load(sys.stdin):
-    if pr.get("baseRefName") == want:
-        print(pr.get("number", ""))
-')
+  done <<<"$CHILD_NUMS_STR"
 fi
 
 # --- Child plan (always printed — the boundary SHA lands in the transcript, ---
@@ -214,13 +260,22 @@ elif [ "$STATE" = "OPEN" ]; then
     echo "Currently on '$BRANCH'; switching to '$DEFAULT_BRANCH'..."
     git checkout "$DEFAULT_BRANCH" >/dev/null 2>&1 || echo "  (warning: could not checkout $DEFAULT_BRANCH)"
   fi
-  if ! run "Merging PR #$PR (--admin --$METHOD)" "${GH[@]}" pr merge "$PR" --admin --"$METHOD"; then
-    rc=$?
+  # Re-read the head tip immediately before merging (I3): a force-push since
+  # the first read would leave PARENT_TIP (the child-rebase boundary) stale.
+  REFRESHED="$("${GH[@]}" pr view "$PR" --json headRefOid 2>/dev/null \
+    | python3 -c 'import json,sys;print(json.load(sys.stdin).get("headRefOid") or "")' 2>/dev/null)"
+  if [ -n "$REFRESHED" ] && [ "$REFRESHED" != "$PARENT_TIP" ]; then
+    echo "  (head moved since first read; rebase boundary '$PARENT_TIP' -> '$REFRESHED')"
+    PARENT_TIP="$REFRESHED"
+  fi
+  mrc=0
+  run "Merging PR #$PR (--admin --$METHOD)" "${GH[@]}" pr merge "$PR" --admin --"$METHOD" || mrc=$?
+  if [ "$mrc" -ne 0 ]; then
     # Recheck: the merge may have succeeded despite a non-zero exit (rare).
     NEWSTATE="$("${GH[@]}" pr view "$PR" --json state 2>/dev/null \
       | python3 -c 'import json,sys;print(json.load(sys.stdin).get("state",""))' 2>/dev/null)"
     if [ "$NEWSTATE" != "MERGED" ]; then
-      echo "merge.sh: gh pr merge failed (exit $rc); state=$NEWSTATE. Aborting — nothing was deleted." >&2
+      echo "merge.sh: gh pr merge failed (exit $mrc); state=$NEWSTATE. Aborting — nothing was deleted." >&2
       exit 1
     fi
     echo "  (merge succeeded despite non-zero exit; continuing)"
@@ -253,15 +308,23 @@ CHILD_RETARGET_FAILED=0
 manual_rebase() {
   local c="$1" head="$2"
   local tip="$PARENT_TIP"
-  [ -n "$tip" ] || tip="\$(gh pr view $PR --json headRefOid -q .headRefOid)  # parent pre-merge tip"
+  # The merged parent PR keeps its headRefOid even after branch deletion.
+  if [ -z "$tip" ]; then
+    tip="$("${GH[@]}" pr view "$PR" --json headRefOid -q .headRefOid 2>/dev/null || true)"
+    [ -n "$tip" ] || tip="<parent pre-merge tip — get it from: ${GH[*]} pr view $PR --json headRefOid>"
+  fi
   cat <<EOF
   # Replay child PR #$c ('$head') own commits onto '$BASE_REF' by hand
-  # (in a worktree — the main checkout may hold uncommitted work):
+  # (in a worktree — the main checkout may hold uncommitted work).
+  # If the parent branch was force-pushed mid-run the boundary may be stale:
+  # cross-check against the parent PR's commit list
+  # (${GH[*]} pr view $PR --json commits) before trusting it.
   git fetch origin '+refs/heads/$head:refs/remotes/origin/$head' '+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF'
-  git worktree add --detach "/tmp/rebase-$head" 'refs/remotes/origin/$head'
-  git -C "/tmp/rebase-$head" rebase --onto 'refs/remotes/origin/$BASE_REF' '$tip'
-  git -C "/tmp/rebase-$head" push --force-with-lease="refs/heads/$head" origin 'HEAD:refs/heads/$head'
-  git worktree remove --force "/tmp/rebase-$head"
+  wt="\$(mktemp -d)"
+  git worktree add --detach "\$wt/wt" 'refs/remotes/origin/$head'
+  git -C "\$wt/wt" rebase --onto 'refs/remotes/origin/$BASE_REF' '$tip'
+  git -C "\$wt/wt" push --force-with-lease="refs/heads/$head" origin 'HEAD:refs/heads/$head'
+  rm -rf "\$wt"
   # then wait for mergeability before merging #$c:
   ${GH[*]} pr view $c --json mergeable,mergeStateStatus
 EOF
@@ -277,27 +340,39 @@ rebase_child() {
     echo "  (no parent tip SHA recorded — cannot isolate child #$c own commits)"
     return 1
   fi
-  tmp="$(mktemp -d "${TMPDIR:-/tmp}/merge-child.XXXXXX" 2>/dev/null)" || return 1
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/merge-child.XXXXXX" 2>/dev/null)" || {
+    echo "  (mktemp failed — cannot create a throwaway worktree for '$head')" >&2
+    return 1
+  }
   wt="$tmp/wt"
+  # Interrupt-safe cleanup (I4): Ctrl-C / kill / terminal close mid-rebase
+  # would otherwise leak the worktree on disk AND registered in
+  # .git/worktrees. The guards make later firings no-ops after a normal path.
+  child_rebase_cleanup() {
+    [ -n "${wt:-}" ] && git worktree remove --force "$wt" >/dev/null 2>&1
+    [ -n "${tmp:-}" ] && rm -rf "$tmp"
+  }
+  trap 'child_rebase_cleanup' EXIT
+  trap 'exit 130' INT TERM
   if ! git fetch -q origin "+refs/heads/$head:refs/remotes/origin/$head" "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"; then
-    rm -rf "$tmp"; echo "  (failed to fetch '$head' / '$BASE_REF')"; return 1
+    child_rebase_cleanup; wt=""; tmp=""; echo "  (failed to fetch '$head' / '$BASE_REF')"; return 1
   fi
   oid="$(git rev-parse --verify -q "refs/remotes/origin/$head" || true)"
   if [ -z "$oid" ]; then
-    rm -rf "$tmp"; echo "  (remote branch '$head' not found)"; return 1
+    child_rebase_cleanup; wt=""; tmp=""; echo "  (remote branch '$head' not found)"; return 1
   fi
   if [ "$oid" = "$PARENT_TIP" ]; then
-    rm -rf "$tmp"
+    child_rebase_cleanup; wt=""; tmp=""
     echo "  child #$c head == parent tip (no commits of its own) — skipping rebase"
     CHILD_SUMMARY+=("child PR #$c: no own commits; nothing to rebase")
     return 0
   fi
   if ! git worktree add --detach "$wt" "refs/remotes/origin/$head" >/dev/null 2>&1; then
-    rm -rf "$tmp"; echo "  (could not create throwaway worktree for '$head')"; return 1
+    child_rebase_cleanup; wt=""; tmp=""; echo "  (could not create throwaway worktree for '$head')"; return 1
   fi
   if git -C "$wt" rebase --onto "refs/remotes/origin/$BASE_REF" "$PARENT_TIP" >/dev/null 2>&1; then
     if git -C "$wt" push --force-with-lease="refs/heads/$head:$oid" origin "HEAD:refs/heads/$head" >/dev/null 2>&1; then
-      git worktree remove --force "$wt" >/dev/null 2>&1; rm -rf "$tmp"
+      child_rebase_cleanup; wt=""; tmp=""
       echo "  rebased #$c onto 'origin/$BASE_REF' (own commits only) and force-pushed ✓"
       echo "  waiting for GitHub to recompute PR #$c mergeability (up to ~2 min)..."
       # The API can serve a stale cached CONFLICTING right after the push, so
@@ -323,20 +398,22 @@ print((d.get("mergeable") or ""), (d.get("mergeStateStatus") or ""))' 2>/dev/nul
         CHILD_SUMMARY+=("child PR #$c ('${CHILD_HEAD[$c]}'): retargeted to '$BASE_REF' ✓ rebased + pushed ✓ mergeable ✓ (state: ${ms:-unknown})")
         return 0
       elif [ "$mg" = "CONFLICTING" ]; then
-        echo "  PR #$c is still CONFLICTING after the rebase — needs manual attention." >&2
+        echo "  PR #$c reports CONFLICTING after the rebase (seen twice — a stale cache is still" >&2
+        echo "  possible: re-check '${GH[*]} pr view $c --json mergeable' before redoing anything)." >&2
+        echo "  If it is truly conflicting, it needs manual attention." >&2
         return 1
       else
         CHILD_SUMMARY+=("child PR #$c ('${CHILD_HEAD[$c]}'): retargeted + rebased + pushed ✓; mergeability still '${mg:-unknown}' after ~2 min — re-check with: gh pr view $c --json mergeable,mergeStateStatus")
         return 0
       fi
     else
-      git worktree remove --force "$wt" >/dev/null 2>&1; rm -rf "$tmp"
+      child_rebase_cleanup; wt=""; tmp=""
       echo "  (force-push of rebased '$head' failed)" >&2
       return 1
     fi
   else
     git -C "$wt" rebase --abort >/dev/null 2>&1
-    git worktree remove --force "$wt" >/dev/null 2>&1; rm -rf "$tmp"
+    child_rebase_cleanup; wt=""; tmp=""
     echo "  (rebase of '$head' hit conflicts — worktree cleaned up, branch untouched)" >&2
     return 1
   fi
@@ -382,6 +459,14 @@ fi
 if [ ${#CHILD_NUMS[@]} -gt 0 ] && [ "$DRY_RUN" = 0 ] && { [ "$METHOD" = "squash" ] || [ "$METHOD" = "rebase" ]; }; then
   for c in "${CHILD_NUMS[@]}"; do
     [ "${CHILD_OK[$c]}" = 1 ] || continue
+    if [ -z "${CHILD_HEAD[$c]}" ]; then
+      # The per-child detail fetch failed earlier (I5): retargeted by number,
+      # but the head branch is unknown, so no auto-rebase and no fabricated
+      # manual commands — point the user at the PR directly.
+      CHILD_MANUAL+=("child PR #$c: could not fetch its head branch (gh pr view failed) — retargeted,")
+      CHILD_MANUAL+=("  but inspect it manually: ${GH[*]} pr view $c --json headRefName,baseRefName,mergeable")
+      continue
+    fi
     cfork=0
     [ -n "${CHILD_REPO[$c]}" ] && [ "${CHILD_REPO[$c]}" != "$BASE_REPO" ] && cfork=1
     if [ "$cfork" = 1 ]; then
