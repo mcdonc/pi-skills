@@ -124,7 +124,11 @@ When the user runs `/skill:merge <PR#> [repo]` (or asks equivalently):
   child (its base already moved); finish it by hand with the printed boundary.
 - The auto-rebase never touches the main checkout (it may hold uncommitted
   work) — it uses a throwaway detached worktree and pushes with
-  `--force-with-lease` pinned to the exact pre-rebase OID.
+  `--force-with-lease` pinned to the exact pre-rebase OID. The push sets
+  `PREK_ALLOW_NO_CONFIG=1`: prek aborts pushes from worktrees that lack
+  `.pre-commit-config.yaml`, which devenv generates only in the main
+  checkout; the replayed commits are content-identical to the reviewed ones
+  and PR CI stays authoritative.
 - Mergeability polling: GitHub serves a stale cached `CONFLICTING` briefly
   after the force-push, so the script trusts `MERGEABLE` immediately but
   `CONFLICTING` only after two consecutive readings 5 s apart.

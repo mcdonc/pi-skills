@@ -322,7 +322,9 @@ manual_rebase() {
   wt="\$(mktemp -d)"
   git worktree add --detach "\$wt/wt" 'refs/remotes/origin/$head'
   git -C "\$wt/wt" rebase --onto 'refs/remotes/origin/$BASE_REF' '$tip'
-  git -C "\$wt/wt" push --force-with-lease="refs/heads/$head" origin 'HEAD:refs/heads/$head'
+  # (PREK_ALLOW_NO_CONFIG=1 skips the pre-push lint when the hook config is
+  #  generated only in the main checkout, e.g. by devenv + prek.)
+  PREK_ALLOW_NO_CONFIG=1 git -C "\$wt/wt" push --force-with-lease="refs/heads/$head" origin 'HEAD:refs/heads/$head'
   git worktree remove --force "\$wt/wt" && rm -rf "\$wt"
   # then wait for mergeability before merging #$c:
   ${GH[*]} pr view $c --json mergeable,mergeStateStatus
@@ -370,7 +372,12 @@ rebase_child() {
     child_rebase_cleanup; wt=""; tmp=""; echo "  (could not create throwaway worktree for '$head')"; return 1
   fi
   if git -C "$wt" rebase --onto "refs/remotes/origin/$BASE_REF" "$PARENT_TIP" >/dev/null 2>&1; then
-    if git -C "$wt" push --force-with-lease="refs/heads/$head:$oid" origin "HEAD:refs/heads/$head" >/dev/null 2>&1; then
+    # PREK_ALLOW_NO_CONFIG: prek aborts pushes from worktrees that lack
+    # .pre-commit-config.yaml — devenv generates it only in the main
+    # checkout. The rebased commits are content-identical to the reviewed
+    # ones (mechanical replay), so skipping the pre-push lint here is safe;
+    # CI on the PR stays authoritative.
+    if PREK_ALLOW_NO_CONFIG=1 git -C "$wt" push --force-with-lease="refs/heads/$head:$oid" origin "HEAD:refs/heads/$head" >"$tmp/push.log" 2>&1; then
       child_rebase_cleanup; wt=""; tmp=""
       echo "  rebased #$c onto 'origin/$BASE_REF' (own commits only) and force-pushed ✓"
       echo "  waiting for GitHub to recompute PR #$c mergeability (up to ~2 min)..."
@@ -406,8 +413,9 @@ print((d.get("mergeable") or ""), (d.get("mergeStateStatus") or ""))' 2>/dev/nul
         return 0
       fi
     else
+      echo "  (force-push of rebased '$head' failed:)" >&2
+      sed 's/^/  /' "$tmp/push.log" >&2 || true
       child_rebase_cleanup; wt=""; tmp=""
-      echo "  (force-push of rebased '$head' failed)" >&2
       return 1
     fi
   else
