@@ -181,10 +181,12 @@ When the user runs `/skill:workon <ISSUE#> [repo]` (or asks equivalently):
      "$HOME/.pi/agent/skills/review/scripts/review-ok.sh" "$d" && newest="$d"
    done
    if [ -n "$newest" ]; then
+     # --out runs keep the review outside the run dir; meta records where.
+     out=$(sed -n 's/^out=//p' "$newest/meta" | head -n 1)
      {
        echo "## Fresh-eyes review"
        echo
-       cat "$newest/review.md"
+       cat "${out:-$newest/review.md}"
      } > /tmp/review-comment.md
      gh pr comment "$pr" --body-file /tmp/review-comment.md
    fi

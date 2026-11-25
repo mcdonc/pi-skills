@@ -63,13 +63,13 @@ you can't see because you wrote them.
    you exactly how to poll. Read its `--help` for all flags.
 
 4. **Monitor and surface the result.** Poll with the command the script prints
-   (`review.sh --status <record dir>`). It prints `running` (print mode buffers
-   everything, so an empty file means nothing), `finished` (read the review to
-   the user and triage the findings into fix-now / discuss / dismiss), or
-   `FAILED:` with the reason and a retry hint — a run that hit the model's
-   output token limit produced no review. Re-spawn with a lower `--thinking`,
-   another `--model`, or a larger output limit (see Notes). Never treat a
-   `FAILED` run as a finished review.
+   (`review.sh --status <record dir>`). It prints `running`/`starting` (print
+   mode buffers everything, so an empty file means nothing), `finished` (read
+   the review to the user and triage the findings into fix-now / discuss /
+   dismiss), or `FAILED:` with the reason and a retry hint — a run that hit
+   the model's output token limit produced no review. Re-spawn with a lower
+   `--thinking`, another `--model`, or a larger output limit (see Notes).
+   Never treat a `FAILED` run as a finished review.
 
 ## Delta reviews (round 2+)
 
@@ -159,7 +159,9 @@ By the time the PR is presentable, the review is usually done. If you run
   `scripts/review-ok.sh <run dir>` is the predicate for "this run finished with
   a review" (records from before `status=` existed fall back to `exit=0` plus a
   non-empty review). A run dir holds `meta`, the mandate as `review.md.prompt`,
-  `review.md`, `review.err.log`, `pid`, `done`.
+  `pid`, `done`; `review.md` and `review.err.log` sit beside the `--out` path
+  (inside the run dir unless `--out` says otherwise; a relative `--out` is
+  resolved against the caller's cwd).
 - **Output-token truncation (reasoning models).** When the final turn stops
   with `length`, `pi -p` prints `Response was truncated: the model reached its
   output token limit.` to stderr and exits 1. A model that spent the whole

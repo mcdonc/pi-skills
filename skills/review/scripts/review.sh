@@ -40,13 +40,15 @@
 #   --status      Report on a run this script spawned: prints `running`/`starting`
 #                 (exit 3), `finished` (exit 0), or `FAILED:` with the reason and a
 #                 retry hint (exit 1). Takes the `record:` dir or any file
-#                 inside it. Exit 2 when it is not a review record.
+#                 inside it. Exit 2 when it is not a review record, or when
+#                 review-ok.sh is not next to this script.
 #
 # The script does NOT write the mandate — the caller (the agent) produces a
 # tailored review prompt. This script just spawns the reviewer correctly.
 #
 # The script also records the run under ~/.pi/agent/reviews/<repo>/<branch>/<ts>/
-# (meta, mandate, review.md, pid, done) so the worktree-indicator footer
+# (meta, the mandate as review.md.prompt, review.md, review.err.log, pid, done)
+# so the worktree-indicator footer
 # extension can show "has this branch been reviewed?". `done` carries
 # status=ok|failed plus a reason: a run that produced no review (the model hit
 # its output token limit, pi crashed, ...) is status=failed, never a finished
@@ -126,6 +128,7 @@ ps_etime_s() {
   local e d=0 h=0 m=0 s a="" b="" c=""
   e="$(ps -o etime= -p "$1" 2>/dev/null | tr -d ' ')"
   [ -n "$e" ] || return 1
+  e="${e%%.*}"   # Darwin prints mm:ss.ss
   case "$e" in *-*) d="${e%%-*}"; e="${e#*-}" ;; esac
   IFS=: read -r a b c <<<"$e"
   case "$e" in *:*:*) h="$a"; m="$b"; s="$c" ;; *:*) m="$a"; s="$b" ;; *) s="$a" ;; esac
@@ -334,11 +337,16 @@ REPO_SLUG="$(repo_slug "$WORKTREE" || true)"
 [ -n "$REPO_SLUG" ] || REPO_SLUG="unknown"
 HEAD_SHA="$REVIEW_HEAD"
 STARTED="$(date +%s)"
-# Two spawns in one second must not share a run dir (the footer lists run dirs
-# by their numeric name, so bump the timestamp rather than add a suffix).
-while [ -e "$PI_REVIEWS_DIR/$REPO_SLUG/$BRANCH_SLUG/$STARTED" ]; do STARTED=$((STARTED + 1)); done
-RUN_DIR="$PI_REVIEWS_DIR/$REPO_SLUG/$BRANCH_SLUG/$STARTED"
-mkdir -p "$RUN_DIR"
+# Two spawns in one second must not share a run dir, and the footer lists run
+# dirs by their numeric name: claim the name with mkdir (atomic) and bump the
+# timestamp on a collision instead of adding a suffix.
+RUN_PARENT="$PI_REVIEWS_DIR/$REPO_SLUG/$BRANCH_SLUG"
+mkdir -p "$RUN_PARENT"
+while :; do
+  RUN_DIR="$RUN_PARENT/$STARTED"
+  mkdir "$RUN_DIR" 2>/dev/null && break
+  STARTED=$((STARTED + 1))
+done
 {
   echo "repo=$REPO_SLUG"
   echo "branch=$BRANCH_AT_LAUNCH"
@@ -353,6 +361,10 @@ mkdir -p "$RUN_DIR"
 } > "$RUN_DIR/meta"
 
 # --- Output file ---
+# A relative --out would be written by the launcher under $WORKTREE but read
+# by --status / review-ok.sh under the caller's cwd. Pin it to the caller's
+# cwd now so every reader resolves the same file.
+case "$OUT" in /*) ;; ?*) OUT="$PWD/$OUT" ;; esac
 # Default lives inside the run dir so past reviews are discoverable later.
 [ -n "$OUT" ] || OUT="$RUN_DIR/review.md"
 : > "$OUT"   # truncate so a stale prior run can't masquerade as this one
@@ -403,7 +415,10 @@ launch() {
     wait "$fg_pid"; rc=$?
     finish_run "$RUN_DIR" "$OUT" "$ERR" "$rc"
     print_status "$RUN_DIR"
-    return "$rc"
+    # Exit by the record's verdict, like --status: a run that produced no
+    # review is a failure even when pi itself exited 0.
+    if grep -q '^status=ok$' "$RUN_DIR/done"; then return 0; fi
+    return 1
   fi
   # Background: capture the REAL pi PID, not the wrapper bash PID. We write a
   # launcher script that contains the full argv baked in (avoids the

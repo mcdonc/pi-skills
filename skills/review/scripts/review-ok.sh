@@ -41,7 +41,7 @@ kv() { sed -n "s/^$1=//p" "$done_f" 2>/dev/null | head -n 1; }
 status="$(kv status)"
 if [ -n "$status" ]; then
   [ "$status" = "ok" ] || no "status=$status reason=$(kv reason)"
-  [ -s "$review" ] || no "status=ok but review.md is empty"
+  [ -s "$review" ] || no "status=ok but the review is empty: $review"
   exit 0
 fi
 
@@ -50,5 +50,5 @@ exit_code="$(kv exit)"
 if [ -n "$exit_code" ] && [ "$exit_code" != "0" ]; then
   no "exit=$exit_code"
 fi
-[ -s "$review" ] || no "review.md is empty"
+[ -s "$review" ] || no "the review is empty: $review"
 exit 0
