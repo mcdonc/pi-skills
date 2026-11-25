@@ -5,7 +5,8 @@
 #   review-ok.sh <run-dir> [--explain]
 #
 # Exit 0 when the run recorded under <run-dir> finished AND succeeded:
-#   - its `done` marker says `status=ok` and `review.md` is non-empty, or
+#   - its `done` marker says `status=ok` and its review (meta's `out=`, else
+#     `review.md`) is non-empty, or
 #   - for records written before `status=` existed: `exit=0` (or no exit line)
 #     and a non-empty `review.md`.
 # Exit 1 otherwise: still running, abandoned, failed, or produced no review.
@@ -22,9 +23,14 @@ set -uo pipefail
 dir="${1:?usage: review-ok.sh <run-dir> [--explain]}"
 explain=0
 [ "${2:-}" = "--explain" ] && explain=1
+# A file inside the run dir (the review.md path) is accepted too.
+[ -f "$dir" ] && dir="$(dirname "$dir")"
 
 done_f="$dir/done"
-review="$dir/review.md"
+# The review lives where meta's `out=` says (a run spawned with --out),
+# else in the run dir.
+review="$(sed -n 's/^out=//p' "$dir/meta" 2>/dev/null | head -n 1)"
+[ -n "$review" ] || review="$dir/review.md"
 
 no() { if [ "$explain" -eq 1 ]; then echo "$1" >&2; fi; exit 1; }
 # First value of KEY in the done marker, if any.

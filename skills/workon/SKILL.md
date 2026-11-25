@@ -141,8 +141,9 @@ When the user runs `/skill:workon <ISSUE#> [repo]` (or asks equivalently):
    url=$(git -C "$wt" config --get remote.origin.url); url=${url%.git}; url=${url#*://}; url=${url#*:}
    slug="$(basename "$(dirname "$url")")/$(basename "$url")"
    branch=$(git -C "$wt" branch --show-current); head=$(git -C "$wt" rev-parse HEAD)
+   bdir=${branch//\//-}   # review.sh records "a/b" as "a-b"
    reviewed=no
-   for d in "$HOME/.pi/agent/reviews/$slug/$branch"/*/; do
+   for d in "$HOME/.pi/agent/reviews/$slug/$bdir"/*/; do
      "$HOME/.pi/agent/skills/review/scripts/review-ok.sh" "$d" || continue
      rh=$(grep -oP '^head=\K[0-9a-f]+' "$d/meta" 2>/dev/null)
      if [ -n "$rh" ] && git -C "$wt" merge-base --is-ancestor "$rh" "$head" 2>/dev/null; then reviewed=yes; break; fi
@@ -172,11 +173,11 @@ When the user runs `/skill:workon <ISSUE#> [repo]` (or asks equivalently):
    findings are addressed, post the reviewer's output as a
    PR comment so the review travels with the PR — reusing `$slug`/`$branch`
    from step 8, pick the newest run that finished with a review and post its
-   text:
+   text (`$bdir` as in step 8):
    ```bash
    pr=$(gh pr view --json number -q .number)   # from the worktree
    newest=""
-   for d in "$HOME/.pi/agent/reviews/$slug/$branch"/*/; do
+   for d in "$HOME/.pi/agent/reviews/$slug/$bdir"/*/; do
      "$HOME/.pi/agent/skills/review/scripts/review-ok.sh" "$d" && newest="$d"
    done
    if [ -n "$newest" ]; then

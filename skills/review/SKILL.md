@@ -87,8 +87,8 @@ Build the mandate as in Workflow steps 1–2, but:
    ```bash
    url=$(git config --get remote.origin.url); url=${url%.git}; url=${url#*://}; url=${url#*:}
    slug="$(basename "$(dirname "$url")")/$(basename "$url")"
-   branch=$(git branch --show-current)
-   newest=$(for d in "$HOME/.pi/agent/reviews/$slug/$branch"/*/; do
+   branch=$(git branch --show-current); bdir=${branch//\//-}   # review.sh records "a/b" as "a-b"
+   newest=$(for d in "$HOME/.pi/agent/reviews/$slug/$bdir"/*/; do
      "$HOME/.pi/agent/skills/review/scripts/review-ok.sh" "$d" && echo "$d"
    done | tail -1)
    base=$(grep -oP '^head=\K[0-9a-f]+' "$newest/meta")
@@ -158,15 +158,16 @@ By the time the PR is presentable, the review is usually done. If you run
   `status=failed` plus a `reason` (`truncated`, `empty`, `error`);
   `scripts/review-ok.sh <run dir>` is the predicate for "this run finished with
   a review" (records from before `status=` existed fall back to `exit=0` plus a
-  non-empty `review.md`).
+  non-empty review). A run dir holds `meta`, the mandate as `review.md.prompt`,
+  `review.md`, `review.err.log`, `pid`, `done`.
 - **Output-token truncation (reasoning models).** When the final turn stops
   with `length`, `pi -p` prints `Response was truncated: the model reached its
   output token limit.` to stderr and exits 1. A model that spent the whole
-  output budget on reasoning emitted no text, so `review.md` is empty. GLM on
-  z.ai counts reasoning tokens against the output cap, and a models.json entry
-  that declares no `maxTokens` leaves the cap to pi/provider defaults, which
-  `--thinking high` on a long review can exhaust. `review.sh` records that as
-  `status=failed reason=truncated` and `--status` prints the retry hint: a
-  lower `--thinking`, another `--model`, or a larger limit on the entry
-  (`maxTokens`, or `samplingParams.max_tokens`, which pi merges into every
-  request body).
+  output budget on reasoning emitted no text, so `review.md` is empty. pi
+  sends the model entry's `maxTokens` as the request's output cap — 16384
+  when the entry omits it (pi 1.6.0 default) — and GLM's reasoning tokens
+  count toward that cap (reported for z.ai; their parameter docs do not say
+  so), so `--thinking high` on a long review can run out before any text.
+  `review.sh` records that as `status=failed reason=truncated` and `--status`
+  prints the retry hint: a lower `--thinking`, another `--model`, or a larger
+  `maxTokens` on the entry in `~/.pi/agent/models.json`.
