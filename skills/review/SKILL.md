@@ -62,9 +62,14 @@ you can't see because you wrote them.
    `--approve` so tools actually run, capturing the real child PID, and telling
    you exactly how to poll. Read its `--help` for all flags.
 
-4. **Monitor and surface the result.** Poll the output file (the script prints
-   the path + a polling command). When the reviewer finishes, read the review to
-   the user and, if asked, triage the findings into fix-now / discuss / dismiss.
+4. **Monitor and surface the result.** Poll with the command the script prints
+   (`review.sh --status <record dir>`). It prints `running` (print mode buffers
+   everything, so an empty file means nothing), `finished` (read the review to
+   the user and triage the findings into fix-now / discuss / dismiss), or
+   `FAILED:` with the reason and a retry hint — a run that hit the model's
+   output token limit produced no review. Re-spawn with a lower `--thinking`,
+   another `--model`, or a larger output limit (see Notes). Never treat a
+   `FAILED` run as a finished review.
 
 ## Delta reviews (round 2+)
 
@@ -84,10 +89,12 @@ Build the mandate as in Workflow steps 1–2, but:
    slug="$(basename "$(dirname "$url")")/$(basename "$url")"
    branch=$(git branch --show-current)
    newest=$(for d in "$HOME/.pi/agent/reviews/$slug/$branch"/*/; do
-     [ -f "$d/done" ] && echo "$d"
+     "$HOME/.pi/agent/skills/review/scripts/review-ok.sh" "$d" && echo "$d"
    done | tail -1)
    base=$(grep -oP '^head=\K[0-9a-f]+' "$newest/meta")
    ```
+   `review-ok.sh` accepts only a run that finished with a review; a truncated or
+   crashed run is not a baseline.
 2. Copy the template and paste the scope block from
    [`references/delta-review-scope.md`](references/delta-review-scope.md)
    at the top, filling in `<base>`, the `<base>..HEAD` diff, and the prior
@@ -111,8 +118,9 @@ By the time the PR is presentable, the review is usually done. If you run
   approval, so without `--approve` it can't run `git`/`read`/`bash` and silently
   produces zero output while appearing to "run." The script always passes it.
 - **Print mode buffers.** `pi -p` writes nothing until it's completely done.
-  Don't read an empty output file as "failed" — check whether the **child PID**
-  is still alive (the script gives you a polling command that does this).
+  An empty output file is normal while the reviewer runs. Do not read it as
+  "failed" — or as "finished" when the run died: poll with `review.sh --status`,
+  which tells `running` from `finished` from `FAILED`.
 - **Fresh session.** The reviewer is a new `pi -p` invocation, so it has no
   conversation memory. It does still load project context (AGENTS.md, skills) so
   it knows the project's conventions and how to run tests — that's desirable.
@@ -146,4 +154,19 @@ By the time the PR is presentable, the review is usually done. If you run
   (`meta`, the mandate, `review.md`, `pid`, `done`). Past reviews stay
   discoverable there, and the `worktree-indicator` footer extension reads these
   records to show `review ✓/◌/✗` for the branch you're working in. Override the
-  location with `PI_REVIEWS_DIR`.
+  location with `PI_REVIEWS_DIR`. `done` carries `status=ok` or
+  `status=failed` plus a `reason` (`truncated`, `empty`, `error`);
+  `scripts/review-ok.sh <run dir>` is the predicate for "this run finished with
+  a review" (records from before `status=` existed fall back to `exit=0` plus a
+  non-empty `review.md`).
+- **Output-token truncation (reasoning models).** When the final turn stops
+  with `length`, `pi -p` prints `Response was truncated: the model reached its
+  output token limit.` to stderr and exits 1. A model that spent the whole
+  output budget on reasoning emitted no text, so `review.md` is empty. GLM on
+  z.ai counts reasoning tokens against the output cap, and a models.json entry
+  that declares no `maxTokens` leaves the cap to pi/provider defaults, which
+  `--thinking high` on a long review can exhaust. `review.sh` records that as
+  `status=failed reason=truncated` and `--status` prints the retry hint: a
+  lower `--thinking`, another `--model`, or a larger limit on the entry
+  (`maxTokens`, or `samplingParams.max_tokens`, which pi merges into every
+  request body).

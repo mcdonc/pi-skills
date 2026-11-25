@@ -132,7 +132,10 @@ When the user runs `/skill:workon <ISSUE#> [repo]` (or asks equivalently):
    has already FINISHED on this branch's history (a completed review whose
    recorded head is an
    ancestor of — or equal to — the current HEAD; review records live under
-   `~/.pi/agent/reviews/<owner>/<repo>/<branch>/<ts>/`):
+   `~/.pi/agent/reviews/<owner>/<repo>/<branch>/<ts>/`). Only a run that
+   finished **with a review** counts (`review-ok.sh`): a reviewer that hit the
+   model's output token limit records `status=failed` beside an empty
+   `review.md`, and that is not a review.
    ```bash
    wt=<WORKTREE_PATH>
    url=$(git -C "$wt" config --get remote.origin.url); url=${url%.git}; url=${url#*://}; url=${url#*:}
@@ -140,7 +143,7 @@ When the user runs `/skill:workon <ISSUE#> [repo]` (or asks equivalently):
    branch=$(git -C "$wt" branch --show-current); head=$(git -C "$wt" rev-parse HEAD)
    reviewed=no
    for d in "$HOME/.pi/agent/reviews/$slug/$branch"/*/; do
-     [ -f "$d/done" ] || continue
+     "$HOME/.pi/agent/skills/review/scripts/review-ok.sh" "$d" || continue
      rh=$(grep -oP '^head=\K[0-9a-f]+' "$d/meta" 2>/dev/null)
      if [ -n "$rh" ] && git -C "$wt" merge-base --is-ancestor "$rh" "$head" 2>/dev/null; then reviewed=yes; break; fi
    done
@@ -168,12 +171,13 @@ When the user runs `/skill:workon <ISSUE#> [repo]` (or asks equivalently):
 9. **Attach the review to the PR.** When the review has finished and its
    findings are addressed, post the reviewer's output as a
    PR comment so the review travels with the PR — reusing `$slug`/`$branch`
-   from step 8, pick the newest finished run and post its text:
+   from step 8, pick the newest run that finished with a review and post its
+   text:
    ```bash
    pr=$(gh pr view --json number -q .number)   # from the worktree
    newest=""
    for d in "$HOME/.pi/agent/reviews/$slug/$branch"/*/; do
-     [ -f "$d/done" ] && [ -s "$d/review.md" ] && newest="$d"
+     "$HOME/.pi/agent/skills/review/scripts/review-ok.sh" "$d" && newest="$d"
    done
    if [ -n "$newest" ]; then
      {

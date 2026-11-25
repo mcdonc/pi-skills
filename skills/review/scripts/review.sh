@@ -34,13 +34,21 @@
 #                 polling instructions.
 #   --pi          Path to the pi binary (default: first of $PI_BIN, then `pi`).
 #
+#   review.sh --status <run-dir | review.md>
+#
+#   --status      Report on a run this script spawned: prints `running` (exit 3),
+#                 `finished` (exit 0), or `FAILED:` with the reason and a retry
+#                 hint (exit 1). Takes the `record:` dir or any file inside it.
+#
 # The script does NOT write the mandate — the caller (the agent) produces a
 # tailored review prompt. This script just spawns the reviewer correctly.
 #
 # The script also records the run under ~/.pi/agent/reviews/<repo>/<branch>/<ts>/
 # (meta, mandate, review.md, pid, done) so the worktree-indicator footer
-# extension can show "has this branch been reviewed?". Override with
-# $PI_REVIEWS_DIR.
+# extension can show "has this branch been reviewed?". `done` carries
+# status=ok|failed plus a reason: a run that produced no review (the model hit
+# its output token limit, pi crashed, ...) is status=failed, never a finished
+# review. Override the location with $PI_REVIEWS_DIR.
 #
 # CRITICAL: print mode (-p) cannot prompt for tool approval, so without --approve
 # pi can't run git/read/bash and silently emits nothing while appearing to run.
@@ -78,8 +86,109 @@ WORKTREE=""
 OUT=""
 FOREGROUND=0
 PI_BIN="${PI_BIN:-pi}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STATUS_TARGET=""
 
-usage() { sed -n '2,42p' "$0"; exit "${1:-0}"; }
+# Usage is the leading comment block (everything above the first code line).
+usage() { sed -n '2,/^[^#]/p' "$0" | sed '$d'; exit "${1:-0}"; }
+
+# Write the `done` marker for a finished run. status=ok only when pi exited 0
+# AND wrote a review; anything else is status=failed with a reason, so no
+# reader (review-ok.sh, workon's check, the footer) mistakes a run that
+# produced nothing for a finished review. Pi reports a `length` stop as
+# `Response was truncated: the model reached its output token limit.` and
+# exit 1; a reasoning model can spend the whole output budget thinking, so
+# review.md is empty. Written via a temp file + mv: a half-written marker
+# (finished= without exit=) would read as success.
+finish_run() {
+  local run_dir="$1" out="$2" err="$3" rc="$4"
+  local status="ok" reason=""
+  if [ "$rc" -ne 0 ]; then
+    status="failed"
+    if grep -qs 'output token limit' "$err"; then reason="truncated"; else reason="error"; fi
+  elif [ ! -s "$out" ]; then
+    status="failed"
+    reason="empty"
+  fi
+  {
+    printf 'finished=%s\nexit=%s\nstatus=%s\n' "$(date +%s)" "$rc" "$status"
+    if [ -n "$reason" ]; then printf 'reason=%s\n' "$reason"; fi
+  } > "$run_dir/.done.tmp" && mv -f "$run_dir/.done.tmp" "$run_dir/done"
+}
+
+# Print one verdict for a recorded run and return its state:
+#   0  finished — a review was produced
+#   1  failed   — the done marker says so (reason=truncated|empty|error), or the
+#                 reviewer is gone and no done marker was ever written
+#   3  running  — no done marker yet and the reviewer pid is alive (or the run
+#                 just started and has no pid on file yet)
+# Takes the run dir or any file inside it (the review.md path, for example).
+print_status() {
+  local target="$1" run_dir out err subject model thinking pid reason started age bytes tag
+  if [ -f "$target" ]; then run_dir="$(dirname "$target")"; else run_dir="${target%/}"; fi
+  if [ ! -f "$run_dir/meta" ]; then
+    echo "review.sh: not a review record (no meta file): $run_dir" >&2
+    return 2
+  fi
+  kv_meta() { sed -n "s/^$1=//p" "$run_dir/meta" | head -n 1; }
+  out="$(kv_meta out)"; [ -n "$out" ] || out="$run_dir/review.md"
+  err="${out%.md}.err.log"
+  subject="$(kv_meta subject)"
+  model="$(kv_meta model)"
+  thinking="$(kv_meta thinking)"
+  tag="$subject [${model:-pi default}${thinking:+, thinking=$thinking}]"
+
+  if [ ! -f "$run_dir/done" ]; then
+    pid="$(sed -n 's/^pid=//p' "$run_dir/pid" 2>/dev/null | head -n 1)"
+    started="$(kv_meta started)"
+    age=$(( $(date +%s) - ${started:-0} ))
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      echo "running: $tag (pid $pid; print mode buffers all output until the end)"
+      return 3
+    fi
+    if [ -z "$pid" ] && [ "$age" -lt 30 ]; then
+      echo "starting: $tag (no pid on file yet; poll again shortly)"
+      return 3
+    fi
+    echo "FAILED: $tag — the reviewer (pid ${pid:-unknown}) is gone and wrote no done marker. Re-spawn the review."
+    return 1
+  fi
+
+  if "$SCRIPT_DIR/review-ok.sh" "$run_dir"; then
+    bytes="$(wc -c <"$out" 2>/dev/null | tr -d ' ')"
+    echo "finished: $tag — ${bytes:-?} bytes of review in $out"
+    return 0
+  fi
+
+  reason="$(sed -n 's/^reason=//p' "$run_dir/done" | head -n 1)"
+  # Records from before `reason=` existed: read the cause off pi's stderr.
+  if [ -z "$reason" ] && grep -qs 'output token limit' "$err" 2>/dev/null; then reason="truncated"; fi
+  echo "FAILED: $tag — no review was produced (reason=${reason:-unknown})."
+  case "$reason" in
+    truncated)
+      cat <<EOF
+The model hit its output token limit before it emitted any text: its reasoning
+used the whole output budget. Retry with a lower --thinking (was: ${thinking:-high}),
+another --model, or a larger output limit for the model (maxTokens, or
+samplingParams.max_tokens, in ~/.pi/agent/models.json).
+EOF
+      ;;
+    empty)
+      echo "pi exited 0 but wrote nothing. Re-spawn; if it repeats, try another --model."
+      ;;
+    *)
+      echo "pi exited non-zero; its stderr is below."
+      ;;
+  esac
+  if [ -s "$out" ]; then
+    echo "Partial output was kept in $out — readable, but the review is incomplete."
+  fi
+  if [ -s "$err" ]; then
+    echo "stderr:"
+    tail -n 5 "$err" | sed 's/^/  /'
+  fi
+  return 1
+}
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -92,10 +201,17 @@ while [ $# -gt 0 ]; do
     --out)        OUT="$2"; shift 2 ;;
     --foreground) FOREGROUND=1; shift ;;
     --pi)         PI_BIN="$2"; shift 2 ;;
+    --status)     STATUS_TARGET="$2"; shift 2 ;;
     -h|--help)    usage 0 ;;
     *) echo "review.sh: unknown argument '$1'" >&2; usage 2 ;;
   esac
 done
+
+# --status only reports on an existing run: it needs no --pr/--prompt.
+if [ -n "$STATUS_TARGET" ]; then
+  print_status "$STATUS_TARGET"
+  exit $?
+fi
 
 [ -n "$PR" ]     || { echo "review.sh: --pr is required (number, URL, branch, or 'local')" >&2; exit 2; }
 [ -n "$PROMPT" ] || { echo "review.sh: --prompt <mandate.md> is required" >&2; exit 2; }
@@ -245,7 +361,8 @@ launch() {
     ( cd "$WORKTREE" && "$PI_BIN" "${ARGS[@]}" "$(cat "$OUT.prompt")" \
         >"$OUT" 2>"$ERR" )
     rc=$?
-    printf 'finished=%s\nexit=%s\n' "$(date +%s)" "$rc" > "$RUN_DIR/done"
+    finish_run "$RUN_DIR" "$OUT" "$ERR" "$rc"
+    print_status "$RUN_DIR"
     return "$rc"
   fi
   # Background: capture the REAL pi PID, not the wrapper bash PID. We write a
@@ -256,6 +373,8 @@ launch() {
   LAUNCHER="$(mktemp -t pr-review.launch.XXXXXX.sh)"
   {
     echo '#!/usr/bin/env bash'
+    # Copy finish_run in verbatim so the classification lives in one place.
+    declare -f finish_run
     printf 'cd %q || exit 1\n' "$WORKTREE"
     # Build the pi command with %q-safe quoting, one arg per line, continuation.
     printf '%q \\
@@ -266,9 +385,9 @@ launch() {
     printf 'review_pid=$!\n'
     printf 'echo "$review_pid" > %q\n' "$PIDFILE"
     printf 'echo "pid=$review_pid" > %q\n' "$RUN_DIR/pid"
-    # Wait (in this detached shell) and record completion for the indicator.
+    # Wait (in this detached shell) and classify the run for the indicator.
     printf 'wait "$review_pid"; rc=$?\n'
-    printf 'printf "finished=%%s\\nexit=%%s\\n" "$(date +%%s)" "$rc" > %q\n' "$RUN_DIR/done"
+    printf 'finish_run %q %q %q "$rc"\n' "$RUN_DIR" "$OUT" "$ERR"
   } > "$LAUNCHER"
   chmod +x "$LAUNCHER"
   # setsid is a util-linux tool macOS does not ship; nohup covers the
@@ -297,21 +416,16 @@ launch() {
   echo "  stderr:   $ERR"
   if [ -n "$REAL_PID" ]; then
     echo "  pid:      $REAL_PID"
-    cat <<EOF
-
-Poll (prints 'finished' when done, else 'running'):
-  ps -p $REAL_PID >/dev/null && echo running || echo finished; tail -5 $OUT
-EOF
   else
-    echo "  pid:      (could not capture — poll the output file directly)"
-    echo
-    echo "Poll:"
-    echo "  tail -5 $OUT"
+    echo "  pid:      (could not capture — the status command below does not need it)"
   fi
   cat <<EOF
 
+Poll (prints 'running', 'finished', or 'FAILED: …' with the reason and a retry hint):
+  $SCRIPT_DIR/$(basename "$0") --status $RUN_DIR
+
 NOTE: pi -p buffers ALL output until it finishes — an empty output file with a
-running pid is NORMAL, not a failure. Wait (reviewers take minutes), then check.
+live pid is NORMAL, not a failure. --status tells running from failed.
 EOF
 }
 
