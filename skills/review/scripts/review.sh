@@ -120,6 +120,18 @@ finish_run() {
   } > "$tmp" && mv -f "$tmp" "$run_dir/done"
 }
 
+# Seconds the process has been running, from ps etime ([[dd-]hh:]mm:ss);
+# prints nothing when the pid is gone. 10# keeps leading zeros decimal.
+ps_etime_s() {
+  local e d=0 h=0 m=0 s a="" b="" c=""
+  e="$(ps -o etime= -p "$1" 2>/dev/null | tr -d ' ')"
+  [ -n "$e" ] || return 1
+  case "$e" in *-*) d="${e%%-*}"; e="${e#*-}" ;; esac
+  IFS=: read -r a b c <<<"$e"
+  case "$e" in *:*:*) h="$a"; m="$b"; s="$c" ;; *:*) m="$a"; s="$b" ;; *) s="$a" ;; esac
+  echo $(( 10#$d * 86400 + 10#$h * 3600 + 10#$m * 60 + 10#$s ))
+}
+
 # Print one verdict for a recorded run and return its state:
 #   0  finished — a review was produced
 #   1  failed   — the done marker says so (reason=truncated|empty|error), or the
@@ -129,7 +141,7 @@ finish_run() {
 #                 just started and has no pid on file yet)
 # Takes the run dir or any file inside it (the review.md path, for example).
 print_status() {
-  local target="$1" run_dir out err subject model thinking pid reason started age bytes tag exit_code partial
+  local target="$1" run_dir out err subject model thinking pid reason started age bytes tag exit_code partial et
   if [ -f "$target" ]; then run_dir="$(dirname "$target")"; else run_dir="${target%/}"; fi
   if [ ! -f "$run_dir/meta" ]; then
     echo "review.sh: not a review record (no meta file): $run_dir" >&2
@@ -151,12 +163,17 @@ print_status() {
     pid="$(sed -n 's/^pid=//p' "$run_dir/pid" 2>/dev/null | head -n 1)"
     started="$(kv_meta started)"
     age=$(( $(date +%s) - ${started:-0} ))
-    # The pid counts only while it is still THIS reviewer: a recycled pid on an
-    # unrelated process must not read as "running" forever.
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null \
-       && ps -o args= -p "$pid" 2>/dev/null | grep -qF -- "review: $subject"; then
-      echo "running: $tag (pid $pid; print mode buffers all output until the end)"
-      return 3
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      # The pid counts only while it is still THIS reviewer. pi rewrites its
+      # process title to "pi", so the command line is no proof; its age is:
+      # the reviewer was born within moments of `started`, a recycled pid was
+      # born at an unrelated time.
+      et="$(ps_etime_s "$pid" || echo -1)"
+      if ps -o args= -p "$pid" 2>/dev/null | grep -qF -- "review: $subject" \
+         || { [ "$et" -ge 0 ] && [ $((age - et)) -ge -5 ] && [ $((age - et)) -le 120 ]; }; then
+        echo "running: $tag (pid $pid; print mode buffers all output until the end)"
+        return 3
+      fi
     fi
     if [ -z "$pid" ] && [ "$age" -lt 30 ]; then
       echo "starting: $tag (no pid on file yet; poll again shortly)"
