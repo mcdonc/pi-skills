@@ -238,7 +238,10 @@ function reviewRecord(wtRoot: string, branch: string, head: string | null): Revi
 		const runDir = resolve(REVIEWS_DIR, slug, branch.replace(/\//g, "-"), name);
 		const done = readKv(resolve(runDir, "done"));
 		const metaHead = readKv(resolve(runDir, "meta")).head ?? "";
-		if (done.finished && (!done.exit || done.exit === "0")) {
+		// A run that wrote no review (review.sh marks it status=failed, e.g. the
+		// model hit its output token limit) is not a completed review even when
+		// pi happened to exit 0.
+		if (done.finished && (!done.exit || done.exit === "0") && done.status !== "failed") {
 			// Ascending scan: each completed run overwrites the last, so the
 			// newest finished review wins. Non-ancestor runs are invisible —
 			// they reviewed commits this branch no longer contains.
